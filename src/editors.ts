@@ -1,0 +1,38 @@
+// Who may use the CMS: the token's GitHub user must be an active member of the editors' team. A positive answer is
+// cached for a few minutes by the token's hash; a refusal is not cached, so a newly added editor gets in at once.
+// The token of a non-member is revoked.
+import { tokenHash, type GitHub } from './github.ts';
+
+export type Verdict = { ok: true; login: string } | { ok: false; reason: 'invalid-token' | 'not-member'; login?: string };
+
+const MAX_ENTRIES = 1000;
+
+export class Editors {
+  readonly #github: GitHub;
+  readonly #ttlMs: number;
+  readonly #cache = new Map<string, { login: string; expires: number }>();
+
+  constructor(github: GitHub, ttlSeconds: number) {
+    this.#github = github;
+    this.#ttlMs = ttlSeconds * 1000;
+  }
+
+  /** The verdict for a token; `revoked` says whether a non-member's token was revoked. */
+  async check(token: string): Promise<Verdict & { revoked?: boolean }> {
+    const hash = tokenHash(token);
+    const cached = this.#cache.get(hash);
+    if (cached && cached.expires > Date.now()) return { ok: true, login: cached.login };
+    this.#cache.delete(hash);
+
+    const user = await this.#github.user(token);
+    if (!user) return { ok: false, reason: 'invalid-token' };
+    if (!(await this.#github.isTeamMember(user.login))) {
+      return { ok: false, reason: 'not-member', login: user.login, revoked: await this.#github.revoke(token) };
+    }
+    if (this.#ttlMs > 0) {
+      if (this.#cache.size >= MAX_ENTRIES) this.#cache.delete(this.#cache.keys().next().value as string);
+      this.#cache.set(hash, { login: user.login, expires: Date.now() + this.#ttlMs });
+    }
+    return { ok: true, login: user.login };
+  }
+}
