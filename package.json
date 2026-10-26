@@ -1,0 +1,26 @@
+{
+  "name": "sobre-cms-gate",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Sign-in (GitHub App) and media uploads for the sobre.arquivo.pt CMS (Decap)",
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "node --test --test-reporter=spec 'test/**/*.test.ts'",
+    "start": "node dist/main.js"
+  },
+  "dependencies": {
+    "aws4": "1.13.2",
+    "yauzl": "3.4.0"
+  },
+  "devDependencies": {
+    "@types/aws4": "1.11.6",
+    "@types/node": "24.19.2",
+    "@types/yauzl": "3.4.0",
+    "typescript": "6.0.3"
+  }
+}
