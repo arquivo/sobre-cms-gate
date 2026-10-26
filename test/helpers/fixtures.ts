@@ -6,6 +6,10 @@ export interface ZipEntry {
   data: string | Buffer;
   /** Stored instead of deflated. */
   store?: boolean;
+  /** The name in the local header, if not `name`. */
+  localName?: string;
+  /** The extra fields of the central directory entry. */
+  extra?: Buffer;
 }
 
 /** A zip archive of the entries, in order. */
@@ -16,6 +20,8 @@ export function zip(entries: ZipEntry[]): Buffer {
   for (const e of entries) {
     const data = Buffer.from(e.data);
     const name = Buffer.from(e.name);
+    const localName = Buffer.from(e.localName ?? e.name);
+    const extra = e.extra ?? Buffer.alloc(0);
     const packed = e.store ? data : deflateRawSync(data);
     const crc = crc32(data);
     const local = Buffer.alloc(30);
@@ -26,7 +32,7 @@ export function zip(entries: ZipEntry[]): Buffer {
     local.writeUInt32LE(crc, 14);
     local.writeUInt32LE(packed.length, 18);
     local.writeUInt32LE(data.length, 22);
-    local.writeUInt16LE(name.length, 26);
+    local.writeUInt16LE(localName.length, 26);
     const central = Buffer.alloc(46);
     central.writeUInt32LE(0x02014b50, 0);
     central.writeUInt16LE(20, 4);
@@ -37,10 +43,11 @@ export function zip(entries: ZipEntry[]): Buffer {
     central.writeUInt32LE(packed.length, 20);
     central.writeUInt32LE(data.length, 24);
     central.writeUInt16LE(name.length, 28);
+    central.writeUInt16LE(extra.length, 30);
     central.writeUInt32LE(offset, 42);
-    locals.push(local, name, packed);
-    centrals.push(central, name);
-    offset += 30 + name.length + packed.length;
+    locals.push(local, localName, packed);
+    centrals.push(central, name, extra);
+    offset += 30 + localName.length + packed.length;
   }
   const directory = Buffer.concat(centrals);
   const end = Buffer.alloc(22);
@@ -50,6 +57,16 @@ export function zip(entries: ZipEntry[]): Buffer {
   end.writeUInt32LE(directory.length, 12);
   end.writeUInt32LE(offset, 16);
   return Buffer.concat([...locals, directory, end]);
+}
+
+/** An Info-ZIP Unicode path extra field (0x7075) that gives the entry named `raw` the name `name`. */
+export function unicodePath(raw: string, name: string): Buffer {
+  const data = Buffer.concat([Buffer.from([1, 0, 0, 0, 0]), Buffer.from(name)]);
+  data.writeUInt32LE(crc32(Buffer.from(raw)), 1);
+  const header = Buffer.alloc(4);
+  header.writeUInt16LE(0x7075, 0);
+  header.writeUInt16LE(data.length, 2);
+  return Buffer.concat([header, data]);
 }
 
 const OOXML = 'application/vnd.openxmlformats-officedocument';
@@ -69,31 +86,163 @@ export const OOXML_MAIN = {
   pptx: { part: 'ppt/presentation.xml', type: `${OOXML}.presentationml.presentation.main+xml` },
 } as const;
 
-/** An Office Open XML file: [Content_Types].xml, the relationships and the main part, plus `extra` entries. */
+const R = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+
+/** A relationships part: [type, target, external?]; types without a scheme are under the OOXML relationships URI. */
+export const rels = (list: [string, string, boolean?][]) =>
+  '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+  '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+  list
+    .map(([type, target, external], i) =>
+      `<Relationship Id="rId${i + 1}" Type="${type.includes(':') ? type : `${R}/${type}`}" Target="${target}"${external ? ' TargetMode="External"' : ''}/>`,
+    )
+    .join('') +
+  '</Relationships>';
+
+/** The main part's relationships part, e.g. word/_rels/document.xml.rels. */
+const relsOf = (part: string) => part.replace(/([^/]+)$/, '_rels/$1.rels');
+
+/** An Office Open XML file: [Content_Types].xml, the relationships and the main part, plus `extra` entries; `rels`
+ * become the main part's relationships. */
 export function ooxml(
   kind: keyof typeof OOXML_MAIN,
-  o: { mainType?: string; defaults?: [string, string][]; overrides?: [string, string][]; extra?: ZipEntry[] } = {},
+  o: {
+    mainType?: string;
+    types?: string | Buffer;
+    defaults?: [string, string][];
+    overrides?: [string, string][];
+    rels?: [string, string, boolean?][];
+    extra?: ZipEntry[];
+  } = {},
 ): Buffer {
   const main = OOXML_MAIN[kind];
   return zip([
-    { name: '[Content_Types].xml', data: contentTypes([[`/${main.part}`, o.mainType ?? main.type], ...(o.overrides ?? [])], o.defaults) },
+    { name: '[Content_Types].xml', data: o.types ?? contentTypes([[`/${main.part}`, o.mainType ?? main.type], ...(o.overrides ?? [])], o.defaults) },
     { name: '_rels/.rels', data: `<Relationships><Relationship Id="rId1" Target="${main.part}"/></Relationships>` },
     { name: main.part, data: '<?xml version="1.0"?><root/>' },
+    ...(o.rels ? [{ name: relsOf(main.part), data: rels(o.rels) }] : []),
     ...(o.extra ?? []),
   ]);
 }
 
+/** A manifest listing [path, media type] entries. */
+export const manifest = (entries: [string, string][], doctype = false) =>
+  '<?xml version="1.0" encoding="UTF-8"?>\n' +
+  (doctype ? '<!DOCTYPE manifest:manifest PUBLIC "-//OpenOffice.org//DTD Manifest 1.0//EN" "Manifest.dtd">\n' : '') +
+  '<manifest:manifest xmlns:manifest="urn:oasis:names:tc:opendocument:xmlns:manifest:1.0" manifest:version="1.3">\n' +
+  entries.map(([path, type]) => ` <manifest:file-entry manifest:full-path="${path}" manifest:media-type="${type}"/>\n`).join('') +
+  '</manifest:manifest>\n';
+
 /** An OpenDocument file: the stored `mimetype` first, the manifest and the content, plus `extra` entries. */
-export function odf(kind: 'text' | 'spreadsheet' | 'presentation', o: { mimetype?: string; storeMimetype?: boolean; extra?: ZipEntry[] } = {}): Buffer {
+export function odf(
+  kind: 'text' | 'spreadsheet' | 'presentation',
+  o: { mimetype?: string; storeMimetype?: boolean; manifest?: string; extra?: ZipEntry[] } = {},
+): Buffer {
   return zip([
     { name: 'mimetype', data: o.mimetype ?? `application/vnd.oasis.opendocument.${kind}`, store: o.storeMimetype ?? true },
-    { name: 'META-INF/manifest.xml', data: '<manifest:manifest/>' },
+    { name: 'META-INF/manifest.xml', data: o.manifest ?? '<manifest:manifest/>' },
     { name: 'content.xml', data: '<office:document-content/>' },
     ...(o.extra ?? []),
   ]);
 }
 
 const filler = Buffer.from('cms-gate test file '.repeat(8));
+const png = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), filler]);
+const xml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><root/>';
+/** A docx as Word writes one: styles, theme, an image, links to web pages (one with `&amp;` in it). */
+const fullDocx = ooxml('docx', {
+  defaults: [['png', 'image/png']],
+  overrides: [
+    ['/word/styles.xml', `${OOXML}.wordprocessingml.styles+xml`],
+    ['/word/settings.xml', `${OOXML}.wordprocessingml.settings+xml`],
+    ['/word/theme/theme1.xml', `${OOXML}.theme+xml`],
+    ['/docProps/core.xml', 'application/vnd.openxmlformats-package.core-properties+xml'],
+  ],
+  rels: [
+    ['styles', 'styles.xml'],
+    ['settings', 'settings.xml'],
+    ['theme', 'theme/theme1.xml'],
+    ['image', 'media/image1.png'],
+    ['hyperlink', 'https://arquivo.pt/?l=pt&amp;q=sobre', true],
+    ['hyperlink', 'mailto:contacto@arquivo.pt', true],
+  ],
+  extra: [
+    { name: 'word/styles.xml', data: xml },
+    { name: 'word/settings.xml', data: xml },
+    { name: 'word/theme/theme1.xml', data: xml },
+    { name: 'word/media/image1.png', data: png },
+    { name: 'docProps/core.xml', data: xml },
+    { name: 'docProps/app.xml', data: xml },
+  ],
+});
+
+/** An xlsx with a sheet, its printer settings and a link. */
+const fullXlsx = ooxml('xlsx', {
+  overrides: [['/xl/worksheets/sheet1.xml', `${OOXML}.spreadsheetml.worksheet+xml`]],
+  defaults: [['bin', `${OOXML}.spreadsheetml.printerSettings`]],
+  rels: [
+    ['worksheet', 'worksheets/sheet1.xml'],
+    ['theme', 'theme/theme1.xml'],
+    ['styles', 'styles.xml'],
+    ['sharedStrings', 'sharedStrings.xml'],
+  ],
+  extra: [
+    { name: 'xl/worksheets/sheet1.xml', data: xml },
+    { name: 'xl/worksheets/_rels/sheet1.xml.rels', data: rels([['printerSettings', '../printerSettings/printerSettings1.bin'], ['hyperlink', 'https://arquivo.pt/', true]]) },
+    { name: 'xl/printerSettings/printerSettings1.bin', data: Buffer.from([0, 1, 2, 3]) },
+    { name: 'xl/theme/theme1.xml', data: xml },
+    { name: 'xl/styles.xml', data: xml },
+    { name: 'xl/sharedStrings.xml', data: xml },
+  ],
+});
+
+/** A pptx with a slide, its layout and master, an image and a link. */
+const fullPptx = ooxml('pptx', {
+  defaults: [['png', 'image/png']],
+  overrides: [['/ppt/slides/slide1.xml', `${OOXML}.presentationml.slide+xml`]],
+  rels: [
+    ['slideMaster', 'slideMasters/slideMaster1.xml'],
+    ['slide', 'slides/slide1.xml'],
+    ['theme', 'theme/theme1.xml'],
+  ],
+  extra: [
+    { name: 'ppt/slides/slide1.xml', data: xml },
+    {
+      name: 'ppt/slides/_rels/slide1.xml.rels',
+      data: rels([['slideLayout', '../slideLayouts/slideLayout1.xml'], ['image', '../media/image1.png'], ['hyperlink', 'https://arquivo.pt/', true]]),
+    },
+    { name: 'ppt/slideLayouts/slideLayout1.xml', data: xml },
+    { name: 'ppt/slideLayouts/_rels/slideLayout1.xml.rels', data: rels([['slideMaster', '../slideMasters/slideMaster1.xml']]) },
+    { name: 'ppt/slideMasters/slideMaster1.xml', data: xml },
+    { name: 'ppt/slideMasters/_rels/slideMaster1.xml.rels', data: rels([['slideLayout', '../slideLayouts/slideLayout1.xml'], ['theme', '../theme/theme1.xml']]) },
+    { name: 'ppt/theme/theme1.xml', data: xml },
+    { name: 'ppt/media/image1.png', data: png },
+  ],
+});
+
+/** An odt as LibreOffice writes one: its manifest lists every part, with an image, a chart and the UI settings. */
+const fullOdt = odf('text', {
+  manifest: manifest([
+    ['/', 'application/vnd.oasis.opendocument.text'],
+    ['Configurations2/', 'application/vnd.sun.xml.ui.configuration'],
+    ['Pictures/1000000000000010.png', 'image/png'],
+    ['Object 1/content.xml', 'text/xml'],
+    ['Object 1/', 'application/vnd.oasis.opendocument.chart'],
+    ['content.xml', 'text/xml'],
+    ['styles.xml', 'text/xml'],
+    ['meta.xml', 'text/xml'],
+    ['settings.xml', 'text/xml'],
+    ['Thumbnails/thumbnail.png', 'image/png'],
+  ]),
+  extra: [
+    { name: 'styles.xml', data: xml },
+    { name: 'meta.xml', data: xml },
+    { name: 'settings.xml', data: xml },
+    { name: 'Pictures/1000000000000010.png', data: png },
+    { name: 'Object 1/content.xml', data: xml },
+    { name: 'Thumbnails/thumbnail.png', data: png },
+  ],
+});
 
 export const SVG = '<?xml version="1.0"?>\n<svg xmlns="http://www.w3.org/2000/svg" onload="alert(document.domain)"><circle r="1"/></svg>\n';
 
@@ -111,6 +260,15 @@ export const ALLOWED: { name: string; data: Buffer; contentType: string }[] = [
   { name: 'texto.odt', data: odf('text'), contentType: 'application/vnd.oasis.opendocument.text' },
   { name: 'folha.ods', data: odf('spreadsheet'), contentType: 'application/vnd.oasis.opendocument.spreadsheet' },
   { name: 'slides.odp', data: odf('presentation'), contentType: 'application/vnd.oasis.opendocument.presentation' },
+  { name: 'relatorio-completo.docx', data: fullDocx, contentType: `${OOXML}.wordprocessingml.document` },
+  { name: 'folha-completa.xlsx', data: fullXlsx, contentType: `${OOXML}.spreadsheetml.sheet` },
+  { name: 'slides-completos.pptx', data: fullPptx, contentType: `${OOXML}.presentationml.presentation` },
+  { name: 'texto-completo.odt', data: fullOdt, contentType: 'application/vnd.oasis.opendocument.text' },
+  {
+    name: 'texto-antigo.odt',
+    data: odf('text', { manifest: manifest([['/', 'application/vnd.oasis.opendocument.text'], ['content.xml', 'text/xml']], true) }),
+    contentType: 'application/vnd.oasis.opendocument.text',
+  },
   { name: 'dados.csv', data: Buffer.from('ano;páginas\n2024;1\n2025;2\n'), contentType: 'text/csv; charset=utf-8' },
   { name: 'leia-me.txt', data: Buffer.from('Olá\tmundo\r\nSegunda linha\f\n'), contentType: 'text/plain; charset=utf-8' },
 ];
@@ -179,6 +337,148 @@ export const REFUSED: { label: string; name: string; data: Buffer; reason: strin
   },
   { label: 'an odt with Basic macros', name: 'texto.odt', data: odf('text', { extra: [{ name: 'Basic/Standard/Module1.xml', data: 'Sub X' }] }), reason: 'macro' },
   { label: 'an ods with scripts', name: 'folha.ods', data: odf('spreadsheet', { extra: [{ name: 'Scripts/python/x.py', data: 'x' }] }), reason: 'macro' },
+  // Names that read differently in other zip readers.
+  {
+    label: 'an xlsx whose entry has a Unicode path field naming another part',
+    name: 'folha.xlsx',
+    data: ooxml('xlsx', { extra: [{ name: 'xl/media/image1.png', data: 'x', extra: unicodePath('xl/media/image1.png', 'xl/media/image2.png') }] }),
+    reason: 'content-mismatch',
+  },
+  {
+    label: 'an xlsx whose local header names another part',
+    name: 'folha.xlsx',
+    data: ooxml('xlsx', { extra: [{ name: 'xl/media/image1.png', localName: 'xl/vbaProject.bin', data: 'x' }] }),
+    reason: 'content-mismatch',
+  },
+  {
+    label: 'an xlsx with a percent-encoded part name',
+    name: 'folha.xlsx',
+    data: ooxml('xlsx', { extra: [{ name: 'xl/vba%50roject.bin%2Exml', data: 'x' }] }),
+    reason: 'content-mismatch',
+  },
+  {
+    label: 'a docx with two content types parts, in different case',
+    name: 'doc.docx',
+    data: ooxml('docx', { extra: [{ name: '[content_types].XML', data: '<Types/>' }] }),
+    reason: 'content-mismatch',
+  },
+  {
+    label: 'a docx with a part twice',
+    name: 'doc.docx',
+    data: ooxml('docx', { extra: [{ name: 'Word/Document.xml', data: '<root/>' }] }),
+    reason: 'content-mismatch',
+  },
+  // XML that says more than it shows.
+  {
+    label: 'an xlsm renamed, its macro type written with character references',
+    name: 'folha.xlsx',
+    data: ooxml('xlsx', { overrides: [['/xl/vbaData.xml', 'application/vnd.ms-office.vb&#x61;Project']] }),
+    reason: 'content-mismatch',
+  },
+  {
+    label: 'a docx whose content types use a named entity',
+    name: 'doc.docx',
+    data: ooxml('docx', { overrides: [['/word/x.xml', '&ct;']] }),
+    reason: 'content-mismatch',
+  },
+  {
+    label: 'a docx whose content types are UTF-16, with a macro type',
+    name: 'doc.docx',
+    data: ooxml('docx', {
+      types: Buffer.from(
+        `\ufeff<?xml version="1.0" encoding="UTF-16"?><Types><Default Extension="bin" ContentType="application/vnd.ms-office.vbaProject"/>` +
+          `<Override PartName="/word/document.xml" ContentType="${OOXML_MAIN.docx.type}"/></Types>`,
+        'utf16le',
+      ),
+    }),
+    reason: 'content-mismatch',
+  },
+  {
+    label: 'a docx whose content types declare another encoding',
+    name: 'doc.docx',
+    data: ooxml('docx', { types: `<?xml version="1.0" encoding="UTF-7"?><Types><Override PartName="/word/document.xml" ContentType="${OOXML_MAIN.docx.type}"/></Types>` }),
+    reason: 'content-mismatch',
+  },
+  {
+    label: 'a docx whose relationships use a character reference',
+    name: 'doc.docx',
+    data: ooxml('docx', { rels: [['ole&#79;bject', 'media/image1.png']] }),
+    reason: 'content-mismatch',
+  },
+  // Relationships to macros, embedded content or external parts, whatever the part is called.
+  { label: 'a docx with an OLE object relationship', name: 'doc.docx', data: ooxml('docx', { rels: [['oleObject', 'media/image1.png']] }), reason: 'macro' },
+  { label: 'a docx with an embedded package relationship', name: 'doc.docx', data: ooxml('docx', { rels: [['package', 'media/image1.png']] }), reason: 'macro' },
+  {
+    label: 'a docx with a VBA project relationship',
+    name: 'doc.docx',
+    data: ooxml('docx', { rels: [['http://schemas.microsoft.com/office/2006/relationships/vbaProject', 'media/data.xml']] }),
+    reason: 'macro',
+  },
+  {
+    label: 'an xlsx with an ActiveX control relationship in a sheet',
+    name: 'folha.xlsx',
+    data: ooxml('xlsx', { extra: [{ name: 'xl/worksheets/_rels/sheet1.xml.rels', data: rels([['activeXControlBinary', '../media/image1.png']]) }] }),
+    reason: 'macro',
+  },
+  {
+    label: 'a docx with an external template',
+    name: 'doc.docx',
+    data: ooxml('docx', { extra: [{ name: 'word/_rels/settings.xml.rels', data: rels([['attachedTemplate', 'https://example.test/t.dotm', true]]) }] }),
+    reason: 'macro',
+  },
+  { label: 'a docx with an external image', name: 'doc.docx', data: ooxml('docx', { rels: [['image', 'https://example.test/a.png', true]] }), reason: 'macro' },
+  {
+    label: 'a docx with an external target after a `>` in an attribute',
+    name: 'doc.docx',
+    data: ooxml('docx', {
+      extra: [
+        {
+          name: 'word/_rels/document.xml.rels',
+          data: '<Relationships><Relationship Id="a>b" Target="https://example.test/a.png" TargetMode="External" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image"/></Relationships>',
+        },
+      ],
+    }),
+    reason: 'macro',
+  },
+  {
+    label: 'a docx with a prefixed relationship element',
+    name: 'doc.docx',
+    data: ooxml('docx', {
+      extra: [
+        {
+          name: 'word/_rels/document.xml.rels',
+          data: '<r:Relationships xmlns:r="http://schemas.openxmlformats.org/package/2006/relationships"><r:Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/oleObject" Target="media/a.png"/></r:Relationships>',
+        },
+      ],
+    }),
+    reason: 'macro',
+  },
+  {
+    label: 'a pptx with an OLE object relationship in an uppercase .RELS part',
+    name: 'slides.pptx',
+    data: ooxml('pptx', { extra: [{ name: 'ppt/slides/_rels/slide1.xml.RELS', data: rels([['oleObject', '../media/image1.png']]) }] }),
+    reason: 'macro',
+  },
+  // The OpenDocument manifest.
+  {
+    label: 'an odt with an OLE object in its manifest',
+    name: 'texto.odt',
+    data: odf('text', { manifest: manifest([['Object 1', 'application/vnd.sun.star.oleobject']]), extra: [{ name: 'Object 1', data: 'ole' }] }),
+    reason: 'macro',
+  },
+  { label: 'an odt listing Basic in its manifest', name: 'texto.odt', data: odf('text', { manifest: manifest([['Basic/', 'application/binary']]) }), reason: 'macro' },
+  {
+    label: 'an odt listing a script library by type',
+    name: 'texto.odt',
+    data: odf('text', { manifest: manifest([['lib/x.xml', 'application/vnd.sun.star.basic-library']]) }),
+    reason: 'macro',
+  },
+  {
+    label: 'an odt whose manifest uses a character reference',
+    name: 'texto.odt',
+    data: odf('text', { manifest: manifest([['Object 1', 'application/vnd.sun.star.ole&#111;bject']]) }),
+    reason: 'content-mismatch',
+  },
   { label: 'an odt claiming another type', name: 'texto.odt', data: odf('spreadsheet'), reason: 'content-mismatch' },
   { label: 'an odt with a deflated mimetype', name: 'texto.odt', data: odf('text', { storeMimetype: false }), reason: 'content-mismatch' },
   { label: 'an odt without a manifest', name: 'texto.odt', data: zip([{ name: 'mimetype', data: 'application/vnd.oasis.opendocument.text', store: true }]), reason: 'content-mismatch' },

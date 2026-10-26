@@ -1,7 +1,9 @@
 // What may be uploaded: the extension must be on the list, and the content must match it. The `Content-Type` written
 // to the bucket comes from this table, never from the client. Office files are opened as zips: they must have the
 // parts of their type and no macros (VBA, Excel 4.0 macro sheets, ActiveX, OLE objects, Basic or scripts in
-// OpenDocument), whatever the extension says. Anything else (SVG, HTML, XML, scripts, executables, archives,
+// OpenDocument), whatever the extension says: not in their part names, content types, relationships or manifest.
+// Their entry names must read the same in every zip reader, and the XML read must be plain (UTF-8, no character or
+// entity references beyond the predefined five). Anything else (SVG, HTML, XML, scripts, executables, archives,
 // macro-enabled office files) is refused. Extending the list is a decision recorded in static-sobre's D7.
 import yauzl from 'yauzl';
 
@@ -77,6 +79,8 @@ function checkText(data: Buffer): Refusal | null {
 
 const MAX_ENTRIES = 20_000;
 const MAX_PART = 1024 * 1024;
+/** All the parts read from one file, together. */
+const MAX_READ = 16 * MAX_PART;
 
 /** Entry names that mean macros or embedded programs, in either format. */
 const MACRO_NAMES = [
@@ -93,25 +97,64 @@ const isMacroName = (name: string) =>
   MACRO_NAMES.some((re) => re.test(name)) || (/\.bin$/i.test(name) && !/(^|\/)printerSettings\/printerSettings\d*\.bin$/i.test(name));
 /** Content types that mean macros or OLE objects. */
 const MACRO_TYPES = /macroenabled|vbaproject|vbadata|macrosheet|activex|oleobject|ms-office\.vba|keymapcustomizations|attachedtoolbars/i;
+/** OOXML relationship types (the end of the URI) that bring in macros, controls, add-ins or embedded documents. */
+const MACRO_RELATIONSHIPS =
+  /\/(vbaProject|vbaProjectSignature\w*|wordVbaData|oleObject|activeXControl|activeXControlBinary|control|package|attachedTemplate|subDocument|aFChunk|xlMacrosheet|xlIntlMacrosheet|dialogsheet|keyMapCustomizations|attachedToolbars|extensibility|userCustomization|webextension|webextensiontaskpanes)$/i;
+/** OpenDocument manifest media types for scripts, besides MACRO_TYPES. */
+const ODF_MACRO_TYPES = /basic|script|python|java/i;
 
 interface Zip {
   names: string[];
   parts: Map<string, Buffer>;
 }
 
-/** The entry names of a zip, and the content of the `wanted` entries (up to MAX_PART each); null if it can't be read. */
-async function readZip(data: Buffer, wanted: string[]): Promise<Zip | null> {
+/** A name with its percent-encoded letters, digits, marks and slashes decoded, as office readers may compare it. */
+const decodeName = (name: string) =>
+  name.replace(/%[0-9a-f]{2}/gi, (m) => {
+    const c = String.fromCharCode(parseInt(m.slice(1), 16));
+    return /[\w.~/\\-]/.test(c) ? c : m;
+  });
+
+/** Whether an entry's name reads the same in every reader: the central name decodes to its raw bytes (UTF-8 if
+ * flagged, else ASCII), there is no Unicode path field (0x7075), no encoded name characters, and the local header has
+ * the same name. */
+function plainName(data: Buffer, entry: yauzl.Entry): boolean {
+  const raw = entry.fileNameRaw;
+  const utf8 = (entry.generalPurposeBitFlag & 0x800) !== 0;
+  let name: string;
+  try {
+    name = utf8 ? new TextDecoder('utf-8', { fatal: true }).decode(raw) : raw.toString('latin1');
+  } catch {
+    return false;
+  }
+  if (name !== entry.fileName || /[\u0000-\u001f\u007f]/.test(name) || (!utf8 && /[^\x20-\x7e]/.test(name))) return false;
+  if (entry.extraFields.some((f) => f.id === 0x7075) || decodeName(name) !== name) return false;
+  const at = entry.relativeOffsetOfLocalHeader;
+  if (at + 30 > data.length) return false;
+  const local = data.subarray(at + 30, at + 30 + data.readUInt16LE(at + 26));
+  return local.equals(raw) && (data.readUInt16LE(at + 6) & 0x800) === (entry.generalPurposeBitFlag & 0x800);
+}
+
+/** The entry names of a zip, and the content of the `wanted` entries (up to MAX_PART each, MAX_READ in all); null if
+ * it can't be read, or if its names are ambiguous (see plainName, and no two names that differ only in case). */
+async function readZip(data: Buffer, wanted: (name: string) => boolean): Promise<Zip | null> {
   if (!startsWith(data, 0x50, 0x4b, 0x03, 0x04)) return null;
   try {
     const zip = await yauzl.fromBufferPromise(data, { lazyEntries: true, autoClose: false, validateEntrySizes: true, strictFileNames: true });
     const names: string[] = [];
+    const seen = new Set<string>();
     const parts = new Map<string, Buffer>();
+    let read = 0;
     try {
       for await (const entry of zip.eachEntry()) {
-        if (names.length >= MAX_ENTRIES || entry.isEncrypted()) return null;
+        if (names.length >= MAX_ENTRIES || entry.isEncrypted() || !plainName(data, entry)) return null;
+        const folded = entry.fileName.toLowerCase();
+        if (seen.has(folded)) return null;
+        seen.add(folded);
         names.push(entry.fileName);
-        if (wanted.includes(entry.fileName)) {
-          if (entry.uncompressedSize > MAX_PART) return null;
+        if (wanted(entry.fileName)) {
+          read += entry.uncompressedSize;
+          if (entry.uncompressedSize > MAX_PART || read > MAX_READ) return null;
           const chunks: Buffer[] = [];
           for await (const chunk of await zip.openReadStreamPromise(entry)) chunks.push(chunk as Buffer);
           parts.set(entry.fileName, Buffer.concat(chunks));
@@ -126,22 +169,55 @@ async function readZip(data: Buffer, wanted: string[]): Promise<Zip | null> {
   }
 }
 
-/** Office Open XML: the main part of the type, and no macro parts or types. */
+/** An XML part as text; null if it could mean more than it shows: not UTF-8, another encoding declared, a NUL, an
+ * entity declaration, or a reference other than the five predefined entities (`&#…;` or another name). */
+function xmlText(part: Buffer | undefined): string | null {
+  if (!part) return null;
+  let text: string;
+  try {
+    text = new TextDecoder('utf-8', { fatal: true }).decode(part);
+  } catch {
+    return null;
+  }
+  if (/\u0000|<!ENTITY|&(?!(?:lt|gt|amp|quot|apos);)/i.test(text)) return null;
+  const encoding = text.match(/^<\?xml\b[^>]*\bencoding\s*=\s*["']([^"']*)["']/)?.[1];
+  return encoding === undefined || /^utf-8$/i.test(encoding) ? text : null;
+}
+
+/** The attributes of each `name` element (with any namespace prefix), as [name, value] pairs. */
+const elements = (xml: string, name: string): [string, string][][] =>
+  [...xml.matchAll(new RegExp(`<(?:[\\w.-]+:)?${name}\\b((?:[^>"']|"[^"]*"|'[^']*')*)>`, 'g'))].map(([, attrs = '']) =>
+    [...attrs.matchAll(/(?:^|\s)([\w.:-]+)\s*=\s*(?:"([^"]*)"|'([^']*)')/g)].map(([, k = '', a, b]) => [k, (a ?? b ?? '').trim()]),
+  );
+/** The values of the attributes with this local name, whatever their prefix: all of them, if it is repeated. */
+const values = (attrs: [string, string][], local: string) => attrs.filter(([k]) => k === local || k.endsWith(`:${local}`)).map(([, v]) => v);
+
+/** Office Open XML: the main part of the type, and no macro parts, types or relationships. */
 async function checkOoxml(data: Buffer, main: string): Promise<Refusal | null> {
-  const zip = await readZip(data, ['[Content_Types].xml']);
-  const types = zip?.parts.get('[Content_Types].xml')?.toString('utf8');
-  if (!zip || !types) return 'content-mismatch';
+  const zip = await readZip(data, (name) => name === '[Content_Types].xml' || /\.rels$/i.test(name));
+  const types = xmlText(zip?.parts.get('[Content_Types].xml'));
+  if (!zip || types === null) return 'content-mismatch';
   if (zip.names.some(isMacroName) || MACRO_TYPES.test(types)) return 'macro';
+  for (const [name, part] of zip.parts) {
+    if (name === '[Content_Types].xml') continue;
+    const rels = xmlText(part);
+    if (rels === null) return 'content-mismatch';
+    // A link to a web page is fine; any other external target (a template, an image, a linked file) is not.
+    for (const rel of elements(rels, 'Relationship')) {
+      const types = values(rel, 'Type');
+      if (types.some((t) => MACRO_RELATIONSHIPS.test(t))) return 'macro';
+      const external = values(rel, 'TargetMode').some((m) => m.toLowerCase() === 'external');
+      if (external && (types.length === 0 || !types.every((t) => /\/hyperlink$/i.test(t)))) return 'macro';
+    }
+  }
   // The main part: an Override with the type's main content type, naming a part that is in the zip.
-  const overrides = [...types.matchAll(/<Override\b([^>]*)>/g)].map(([, attrs = '']) => ({
-    part: attrs.match(/PartName\s*=\s*["']([^"']*)["']/)?.[1] ?? '',
-    type: attrs.match(/ContentType\s*=\s*["']([^"']*)["']/)?.[1] ?? '',
-  }));
-  const found = overrides.some((o) => o.type.toLowerCase() === main && zip.names.includes(o.part.replace(/^\//, '')));
+  const found = elements(types, 'Override').some(
+    (o) => values(o, 'ContentType').some((t) => t.toLowerCase() === main) && values(o, 'PartName').some((p) => zip.names.includes(p.replace(/^\//, ''))),
+  );
   return found ? null : 'content-mismatch';
 }
 
-/** OpenDocument: a stored `mimetype` first entry with the type, and no Basic or scripts. */
+/** OpenDocument: a stored `mimetype` first entry with the type, and no Basic, scripts or OLE objects. */
 async function checkOdf(data: Buffer, contentType: string): Promise<Refusal | null> {
   // The format's own signature: the first local header is `mimetype`, stored, followed by the type.
   const nameLength = data.length >= 30 ? data.readUInt16LE(26) : 0;
@@ -150,8 +226,14 @@ async function checkOdf(data: Buffer, contentType: string): Promise<Refusal | nu
   if (!stored || nameLength !== 8 || !ascii(data, 30, 'mimetype') || !ascii(data, 30 + 8 + extraLength, contentType)) {
     return 'content-mismatch';
   }
-  const zip = await readZip(data, ['mimetype', 'META-INF/manifest.xml']);
+  const zip = await readZip(data, (name) => name === 'mimetype' || name === 'META-INF/manifest.xml');
   if (!zip || zip.names[0] !== 'mimetype' || zip.parts.get('mimetype')?.toString('latin1') !== contentType) return 'content-mismatch';
-  if (!zip.parts.has('META-INF/manifest.xml')) return 'content-mismatch';
-  return zip.names.some(isMacroName) ? 'macro' : null;
+  const manifest = xmlText(zip.parts.get('META-INF/manifest.xml'));
+  if (manifest === null) return 'content-mismatch';
+  // The manifest says what each entry is: an OLE object or a script library is refused whatever its name.
+  const entries = elements(manifest, 'file-entry');
+  const paths = entries.flatMap((e) => values(e, 'full-path'));
+  const types = entries.flatMap((e) => values(e, 'media-type'));
+  const macro = paths.some(isMacroName) || types.some((t) => MACRO_TYPES.test(t) || ODF_MACRO_TYPES.test(t));
+  return macro || zip.names.some(isMacroName) ? 'macro' : null;
 }
