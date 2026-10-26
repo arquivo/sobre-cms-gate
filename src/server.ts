@@ -24,6 +24,10 @@ const LIST_DEFAULT = 100;
 const LIST_MAX = 1000;
 const MAX_CURSOR = 1024;
 const TOKEN = /^Bearer ([\x21-\x7e]{1,512})$/;
+/** `multipart/form-data` with its boundary as the only parameter, quoted or not (RFC 2046). */
+const BOUNDARY = /^multipart\/form-data\s*;\s*boundary=(?:"([0-9A-Za-z'()+_,./:=? -]{0,69}[0-9A-Za-z'()+_,./:=?-])"|([0-9A-Za-z!#$%&'*+.^_`|~-]{1,70}))\s*$/i;
+/** The form holds one part: its opening and closing delimiters. */
+const MAX_DELIMITERS = 2;
 
 const ROUTES: Record<string, string[]> = {
   '/cms-api/health': ['GET', 'HEAD'],
@@ -95,6 +99,13 @@ function readCookie(req: http.IncomingMessage, name: string): string | undefined
     if (eq > 0 && part.slice(0, eq).trim() === name) return part.slice(eq + 1).trim();
   }
   return undefined;
+}
+
+/** How many times `delimiter` occurs in `body`, counted up to `max + 1`. */
+function count(body: Buffer, delimiter: Buffer, max: number): number {
+  let n = 0;
+  for (let i = body.indexOf(delimiter); i >= 0 && n <= max; i = body.indexOf(delimiter, i + delimiter.length)) n++;
+  return n;
 }
 
 /** The body, up to `max` bytes; null if it is longer (the rest is read and dropped, up to DRAIN_LIMIT). */
@@ -258,6 +269,9 @@ export function createServer(config: Config, deps: Deps): http.Server {
     if (!login) return;
     const contentType = req.headers['content-type'] ?? '';
     if (!/^multipart\/form-data\s*;/i.test(contentType)) return fail(res, 'unsupported-media-type');
+    const boundary = contentType.match(BOUNDARY);
+    if (!boundary) return fail(res, 'bad-form');
+    const delimiter = Buffer.from(`--${boundary[1] ?? boundary[2]}`);
     const maxBody = config.maxUploadBytes + MULTIPART_OVERHEAD;
     if (Number(req.headers['content-length'] ?? 0) > maxBody) return fail(res, 'too-large', { connection: 'close' });
     if (limits.uploadBytes.remaining(login) <= 0 || !limits.uploads.take(login)) {
@@ -270,6 +284,9 @@ export function createServer(config: Config, deps: Deps): http.Server {
     try {
       const body = await readBody(req, maxBody);
       if (!body) return fail(res, 'too-large', { connection: 'close' });
+      // Counted before the form is parsed, so a body of many small parts costs no more than one file: any occurrence of
+      // the delimiter counts, wherever it is, as no parser sees more parts than that.
+      if (count(body, delimiter, MAX_DELIMITERS) > MAX_DELIMITERS) return fail(res, 'bad-form');
       let form: FormData;
       try {
         form = await new Request('http://cms-gate.invalid/', { method: 'POST', headers: { 'content-type': contentType }, body }).formData();

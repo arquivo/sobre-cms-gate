@@ -217,6 +217,23 @@ describe('media uploads', () => {
     assert.equal(app.s3.objects.size, 0);
   });
 
+  test('a form of many parts is refused before it is parsed; the boundary may be quoted', async () => {
+    const send = (type: string, body: string) =>
+      fetch(`${app.url}/cms-api/media`, { method: 'POST', body, headers: { origin: CMS_ORIGIN, authorization: `Bearer ${token}`, 'content-type': type } });
+    const part = (name: string) => `--b0und4ry\r\nContent-Disposition: form-data; name="${name}"\r\n\r\nx\r\n`;
+    const many = await send('multipart/form-data; boundary=b0und4ry', `${Array.from({ length: 1500 }, (_, i) => part(`f${i}`)).join('')}--b0und4ry--\r\n`);
+    assert.equal(many.status, 400);
+    assert.equal(((await many.json()) as { error: string }).error, 'bad-form');
+    const file = `--b0und4ry\r\nContent-Disposition: form-data; name="file"; filename="nota.txt"\r\nContent-Type: text/plain\r\n\r\nolá\r\n--b0und4ry--\r\n`;
+    assert.equal((await send('multipart/form-data; boundary="b0und4ry"', file)).status, 201);
+    for (const type of ['multipart/form-data; charset=utf-8', 'multipart/form-data; boundary=b0und4ry; boundary=other', 'multipart/form-data; boundary=']) {
+      const res = await send(type, file);
+      assert.equal(res.status, 400, type);
+      assert.equal(((await res.json()) as { error: string }).error, 'bad-form');
+    }
+    assert.equal(app.s3.objects.size, 1);
+  });
+
   test('a storage failure is reported without details', async () => {
     app.s3.failWith = 500;
     const res = await app.upload(token, 'logo.png', png);

@@ -65,8 +65,9 @@ check, with the App's client id and secret), so a token of another App or OAuth 
 and a refusal is not cached. A POST must carry `Origin: <CMS_ORIGIN>`; a GET with an `Origin` must have that one; a
 `Sec-Fetch-Site` other than `same-origin` is refused.
 
-**Upload.** `POST /cms-api/media`, `multipart/form-data` with exactly one field, `file`, holding the file. The answer
-is `201`:
+**Upload.** `POST /cms-api/media`, `multipart/form-data` with exactly one field, `file`, holding the file. The
+`Content-Type` has the boundary as its only parameter; a body with more than one part is refused before it is parsed.
+The answer is `201`:
 
 ```json
 {
@@ -113,7 +114,7 @@ When `cursor` is not null, pass it back to get the next page. Only keys under `S
 
 | Status | `error` | When |
 | --- | --- | --- |
-| 400 | `bad-request`, `bad-form` | bad query; a form that is not one `file` field |
+| 400 | `bad-request`, `bad-form` | bad query; a form that is not one `file` field, or a `Content-Type` with other parameters than the boundary |
 | 401 | `invalid-token` | missing, invalid or expired token, or not one of this App's (`WWW-Authenticate: Bearer`) |
 | 403 | `not-member`, `bad-origin` | not in the team (the token is revoked); wrong `Origin` or `Sec-Fetch-Site` |
 | 404, 405 | `not-found`, `method-not-allowed` | |
