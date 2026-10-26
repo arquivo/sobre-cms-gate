@@ -1,5 +1,6 @@
-// GitHub, for the sign-in and the team check: the App's web flow (code for user token), the user, the team membership
-// (with an installation token limited to Members: read), and the revocation of a non-member's token.
+// GitHub, for the sign-in and the team check: the App's web flow (code for user token), the token check (a user token
+// of this App, and its user), the team membership (with an installation token limited to Members: read), and the
+// revocation of a non-member's token.
 // Errors carry the endpoint and status only, never a token or a response body.
 import { createHash, createSign } from 'node:crypto';
 import type { Config } from './config.ts';
@@ -67,16 +68,24 @@ export class GitHub {
     return data.access_token;
   }
 
-  /** The token's user, or null if GitHub doesn't accept the token. */
-  async user(token: string): Promise<GitHubUser | null> {
-    const res = await this.#fetch(new URL('/user', this.#config.apiUrl), { headers: { ...API_HEADERS, authorization: `Bearer ${token}` } });
-    if (res.status === 401 || res.status === 403) return null;
-    if (!res.ok) throw new GitHubError(`GET /user failed (${res.status})`);
-    const data = await readJson(res, 'GET /user');
-    if (typeof data.login !== 'string' || !LOGIN.test(data.login) || typeof data.id !== 'number') {
-      throw new GitHubError('GET /user returned an unexpected user');
+  /** The token's user, if it is a user token of this App (checked with the App's client id and secret); null if
+   * GitHub doesn't know the token, or it belongs to another App or OAuth app. */
+  async tokenUser(token: string): Promise<GitHubUser | null> {
+    const res = await this.#fetch(this.#tokenUrl(), {
+      method: 'POST',
+      headers: { ...API_HEADERS, authorization: this.#basic(), 'content-type': 'application/json' },
+      body: JSON.stringify({ access_token: token }),
+    });
+    if (res.status === 404 || res.status === 422) return null;
+    if (!res.ok) throw new GitHubError(`token check failed (${res.status})`);
+    const data = await readJson(res, 'token check');
+    const app = data.app as { client_id?: unknown } | null | undefined;
+    const user = data.user as { login?: unknown; id?: unknown } | null | undefined;
+    if (app?.client_id !== this.#config.clientId) return null;
+    if (typeof user?.login !== 'string' || !LOGIN.test(user.login) || typeof user.id !== 'number') {
+      throw new GitHubError('token check returned an unexpected user');
     }
-    return { login: data.login, id: data.id };
+    return { login: user.login, id: user.id };
   }
 
   /** Whether the user is an active member of the team (a pending invitation is not). */
@@ -95,11 +104,10 @@ export class GitHub {
 
   /** Revokes a user token of the App. Best effort: false if GitHub didn't confirm it. */
   async revoke(token: string): Promise<boolean> {
-    const basic = Buffer.from(`${this.#config.clientId}:${this.#config.clientSecret}`).toString('base64');
     try {
-      const res = await this.#fetch(new URL(`/applications/${encodeURIComponent(this.#config.clientId)}/token`, this.#config.apiUrl), {
+      const res = await this.#fetch(this.#tokenUrl(), {
         method: 'DELETE',
-        headers: { ...API_HEADERS, authorization: `Basic ${basic}`, 'content-type': 'application/json' },
+        headers: { ...API_HEADERS, authorization: this.#basic(), 'content-type': 'application/json' },
         body: JSON.stringify({ access_token: token }),
       });
       return res.status === 204;
@@ -123,6 +131,15 @@ export class GitHub {
     }
     this.#installation = { token: data.token, expires };
     return data.token;
+  }
+
+  /** The App's endpoint for its user tokens (check, revoke), and its client credentials for it. */
+  #tokenUrl(): URL {
+    return new URL(`/applications/${encodeURIComponent(this.#config.clientId)}/token`, this.#config.apiUrl);
+  }
+
+  #basic(): string {
+    return `Basic ${Buffer.from(`${this.#config.clientId}:${this.#config.clientSecret}`).toString('base64')}`;
   }
 
   /** The App's JWT (RS256), valid for nine minutes, backdated one minute for clock drift. */

@@ -1,5 +1,5 @@
-// A local GitHub for the tests: the web flow (authorize, code for token), the user, team memberships, installation
-// tokens (with the App's JWT checked) and token revocation. It records what it was asked, for the assertions.
+// A local GitHub for the tests: the web flow (authorize, code for token), the App's token check, team memberships,
+// installation tokens (with the App's JWT checked) and token revocation. It records what it was asked, for the assertions.
 import http from 'node:http';
 import { createVerify, randomBytes, type KeyObject } from 'node:crypto';
 import { readBody, listen } from './net.ts';
@@ -32,9 +32,11 @@ export interface StubGitHub {
   /** The login that the next authorize will sign in. */
   nextLogin: string;
   /** Status codes to answer instead, by endpoint; `not-json` is a 200 with an HTML body. */
-  failWith: Partial<Record<'token' | 'user' | 'membership' | 'installation' | 'revoke', number | 'not-json'>>;
-  /** A user token, as if the user had signed in. */
-  tokenFor(login: string): string;
+  failWith: Partial<Record<'token' | 'check' | 'membership' | 'installation' | 'revoke', number | 'not-json'>>;
+  /** The client id the token check answers with, if not the App's. */
+  checkClientId: string | undefined;
+  /** A user token, as if the user had signed in: to this App, or to another App (which this App can't check). */
+  tokenFor(login: string, o?: { otherApp?: boolean }): string;
   close(): Promise<void>;
 }
 
@@ -68,6 +70,7 @@ export async function startStubGitHub(o: StubGitHubOptions): Promise<StubGitHub>
   const ids = new Map<string, number>();
   const codes = new Map<string, string>();
   const installation = new Set<string>();
+  const otherApp = new Set<string>();
 
   const stub: Omit<StubGitHub, 'url' | 'close'> = {
     members: new Map(),
@@ -79,9 +82,11 @@ export async function startStubGitHub(o: StubGitHubOptions): Promise<StubGitHub>
     refreshTokens: [],
     nextLogin: 'editor',
     failWith: {},
-    tokenFor(login) {
+    checkClientId: undefined,
+    tokenFor(login, t = {}) {
       const token = `ghu_${randomBytes(18).toString('base64url')}`;
       this.tokens.set(token, login);
+      if (t.otherApp) otherApp.add(token);
       if (!ids.has(login)) ids.set(login, ids.size + 1000);
       return token;
     },
@@ -119,13 +124,6 @@ export async function startStubGitHub(o: StubGitHubOptions): Promise<StubGitHub>
       return json(res, 200, { access_token: stub.tokenFor(login), token_type: 'bearer', expires_in: 28800, refresh_token: refresh });
     }
 
-    if (req.method === 'GET' && path === '/user') {
-      if (failed(res, stub.failWith.user)) return;
-      const login = bearer ? stub.tokens.get(bearer) : undefined;
-      if (!login || stub.revoked.includes(bearer ?? '')) return json(res, 401, { message: 'Bad credentials' });
-      return json(res, 200, { login, id: ids.get(login) });
-    }
-
     const membership = path.match(/^\/orgs\/([^/]+)\/teams\/([^/]+)\/memberships\/([^/]+)$/);
     if (req.method === 'GET' && membership) {
       if (!bearer || !installation.has(bearer)) return json(res, 401, { message: 'Bad credentials' });
@@ -144,12 +142,19 @@ export async function startStubGitHub(o: StubGitHubOptions): Promise<StubGitHub>
       return json(res, 201, { token, expires_at: new Date(Date.now() + 3600_000).toISOString() });
     }
 
-    if (req.method === 'DELETE' && path === `/applications/${o.clientId}/token`) {
+    // The App's own tokens, with its client id and secret: GitHub answers 404 for a token it doesn't know, a revoked
+    // one, or another App's.
+    if ((req.method === 'POST' || req.method === 'DELETE') && path === `/applications/${o.clientId}/token`) {
       const basic = Buffer.from(`${o.clientId}:${o.clientSecret}`).toString('base64');
       if (req.headers.authorization !== `Basic ${basic}`) return json(res, 401, { message: 'Bad credentials' });
-      if (failed(res, stub.failWith.revoke)) return;
+      if (failed(res, req.method === 'POST' ? stub.failWith.check : stub.failWith.revoke)) return;
       const token = (JSON.parse(body.toString() || '{}') as { access_token?: string }).access_token ?? '';
-      if (!stub.tokens.has(token)) return json(res, 404, { message: 'Not Found' });
+      const login = stub.tokens.get(token);
+      if (!login || otherApp.has(token) || stub.revoked.includes(token)) return json(res, 404, { message: 'Not Found' });
+      if (req.method === 'POST') {
+        const app = { client_id: stub.checkClientId ?? o.clientId, name: 'sobre-cms', url: 'https://github.com/apps/sobre-cms' };
+        return json(res, 200, { token, app, user: { login, id: ids.get(login) }, scopes: [] });
+      }
       stub.revoked.push(token);
       res.writeHead(204);
       return res.end();

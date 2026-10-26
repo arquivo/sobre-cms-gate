@@ -145,7 +145,7 @@ describe('sign-in', () => {
 
   test('GitHub failures give an error page without a token', async () => {
     app.github.members.set('ana', 'active');
-    for (const failure of ['token', 'user', 'membership'] as const) {
+    for (const failure of ['token', 'check', 'membership'] as const) {
       for (const answer of [500, 'not-json'] as const) {
         app.github.failWith = { [failure]: answer };
         const { response, token, message } = await app.signIn('ana');

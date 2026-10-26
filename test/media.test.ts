@@ -168,11 +168,31 @@ describe('media uploads', () => {
   test('the team check is cached briefly per token', async () => {
     const bea = app.github.tokenFor('bea');
     app.github.members.set('bea', 'active');
-    const users = () => app.github.calls.filter((c) => c === 'GET /user').length;
+    const checks = () => app.github.calls.filter((c) => c === 'POST /applications/Iv23liTestClientId/token').length;
+    const before = checks();
     assert.equal((await app.upload(bea, 'a.png', png)).status, 201);
-    const after = users();
+    const after = checks();
+    assert.equal(after, before + 1);
     assert.equal((await app.upload(bea, 'b.png', png)).status, 201);
-    assert.equal(users(), after, 'second request answered from the cache');
+    assert.equal(checks(), after, 'second request answered from the cache');
+  });
+
+  test("only this App's tokens are accepted", async () => {
+    const foreign = app.github.tokenFor('ana', { otherApp: true });
+    for (let i = 0; i < 2; i++) {
+      const res = await app.upload(foreign, 'logo.png', png);
+      assert.equal(res.status, 401);
+      assert.equal(((await res.json()) as { error: string }).error, 'invalid-token');
+    }
+    assert.equal((await app.list(foreign)).status, 401);
+    assert.ok(!app.github.revoked.includes(foreign), 'not revoked: it is not ours to revoke');
+    app.github.checkClientId = 'Iv23liAnotherClientId';
+    try {
+      assert.equal((await app.upload(app.github.tokenFor('ana'), 'logo.png', png)).status, 401, 'an answer for another App');
+    } finally {
+      app.github.checkClientId = undefined;
+    }
+    assert.equal(app.s3.objects.size, 0);
   });
 
   test('the form must hold one file, in the field "file"', async () => {
@@ -205,7 +225,7 @@ describe('media uploads', () => {
   });
 
   test('an answer from GitHub that is not JSON is reported as GitHub unavailable', async () => {
-    app.github.failWith = { user: 'not-json' };
+    app.github.failWith = { check: 'not-json' };
     try {
       const res = await app.upload(app.github.tokenFor('ana'), 'logo.png', png);
       assert.equal(res.status, 502);

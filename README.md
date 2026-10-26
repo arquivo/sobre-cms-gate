@@ -47,7 +47,8 @@ for the two sign-in pages only their own inline script and style, by hash.
    the callback URL, the state and `allow_signup=false`.
 2. `/cms-api/callback` clears the cookie, compares it with `state` (in constant time), and exchanges the code for a
    user token with the client secret. The refresh token is dropped.
-3. It reads the user (`GET /user`) and, with an installation token made from the App's private key, checks
+3. It checks the token with the App's client id and secret (`POST /applications/<client id>/token`), which gives the
+   token's user, and, with an installation token made from the App's private key, checks
    `GET /orgs/<org>/teams/<team>/memberships/<login>`: the state must be `active`.
 4. A member gets a page that runs Decap's handshake: it posts `authorizing:github` to `window.opener`, waits for the
    opener's answer from the CMS origin, and posts `authorization:github:success:{"token":…,"provider":"github"}`,
@@ -58,7 +59,9 @@ for the two sign-in pages only their own inline script and style, by hash.
 ### Media API
 
 Both media requests need `Authorization: Bearer <the editor's GitHub token>`, the one Decap holds. cms-gate checks
-the token and the team on each request; a member's answer is cached for `TEAM_CACHE_SECONDS` by the token's SHA-256,
+the token and the team on each request, as at sign-in: the token must be a user token of this App (GitHub's token
+check, with the App's client id and secret), so a token of another App or OAuth app, or a personal access token, is
+`invalid-token` whoever it belongs to. A member's answer is cached for `TEAM_CACHE_SECONDS` by the token's SHA-256,
 and a refusal is not cached. A POST must carry `Origin: <CMS_ORIGIN>`; a GET with an `Origin` must have that one; a
 `Sec-Fetch-Site` other than `same-origin` is refused.
 
@@ -111,7 +114,7 @@ When `cursor` is not null, pass it back to get the next page. Only keys under `S
 | Status | `error` | When |
 | --- | --- | --- |
 | 400 | `bad-request`, `bad-form` | bad query; a form that is not one `file` field |
-| 401 | `invalid-token` | missing, invalid or expired token (`WWW-Authenticate: Bearer`) |
+| 401 | `invalid-token` | missing, invalid or expired token, or not one of this App's (`WWW-Authenticate: Bearer`) |
 | 403 | `not-member`, `bad-origin` | not in the team (the token is revoked); wrong `Origin` or `Sec-Fetch-Site` |
 | 404, 405 | `not-found`, `method-not-allowed` | |
 | 409 | `no-free-name` | 100 files with that name this month |
@@ -262,6 +265,7 @@ GetObject and AbortMultipartUpload on `sobre-media/media/*`, ListBucket with pre
 | --- | --- |
 | Someone outside the VPN or office reaches the CMS | Caddy's `remote_ip` allowlist (and the firewall); cms-gate listens on 127.0.0.1 only. |
 | A GitHub user who is not an editor signs in | The team check at sign-in, with the App's own installation token; the token is revoked and never sent to the browser. |
+| An editor's token from another App or tool is used on the media API | Only this App's user tokens are accepted: GitHub's token check, with the App's client id and secret. |
 | An ex-editor keeps using an old token | The team check on each upload and list (cached 5 minutes at most); the token is revoked once the check fails; tokens expire after 8 hours. |
 | Login CSRF, or a forged callback | The state cookie (`__Host-`, `HttpOnly`, 10 minutes), compared in constant time and cleared on every callback. |
 | The token is posted to another window | `postMessage` targets only `CMS_ORIGIN`, after a handshake from the opener at that origin; the popup's CSP allows only its own script. |
@@ -319,12 +323,13 @@ for the image. There is no ESLint: `tsc` runs in strict mode with `noUnusedLocal
 `noImplicitReturns`, `noImplicitOverride`, `noFallthroughCasesInSwitch`, `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes` and
 `erasableSyntaxOnly`, which covers what a linter would catch here without a dozen more dev dependencies.
 
-The tests (`node --test`) start the real server against a stub GitHub (authorize, token, user, team membership,
-installation tokens, revoke) and a stub S3 that checks the signatures, all on 127.0.0.1. They cover the state check,
-the handshake and the posted origin (the popup's script runs in `node:vm`), a non-member and the revoke, every allowed
-type, every refused type (including renamed SVGs and an xlsx with a macro), the size limits, an existing key, the
-rate limits, the listing, the configuration checks, the health check holding no secret, and the logs holding no
-token or content. `scripts/smoke.sh` runs the built image read-only with dummy secrets.
+The tests (`node --test`) start the real server against a stub GitHub (authorize, token, token check, team
+membership, installation tokens, revoke) and a stub S3 that checks the signatures, all on 127.0.0.1. They cover the
+state check, the handshake and the posted origin (the popup's script runs in `node:vm`), a non-member and the revoke,
+another App's token, GitHub failing or answering something other than JSON, every allowed type, every refused type
+(including renamed SVGs and an xlsx with a macro), the size limits, an existing key, the rate limits, the listing, the
+configuration checks, the health check holding no secret, and the logs holding no token or content.
+`scripts/smoke.sh` runs the built image read-only with dummy secrets.
 
 `npm audit` reports 0 vulnerabilities, for all and for production dependencies.
 

@@ -1,4 +1,5 @@
-// Who may use the CMS: the token's GitHub user must be an active member of the editors' team. A positive answer is
+// Who may use the CMS: the token must be a user token of this App, and its GitHub user an active member of the
+// editors' team. A token of another App or OAuth app is refused as invalid, whoever it belongs to. A positive answer is
 // cached for a few minutes by the token's hash; a refusal is not cached, so a newly added editor gets in at once.
 // The token of a non-member is revoked.
 import { tokenHash, type GitHub } from './github.ts';
@@ -24,7 +25,7 @@ export class Editors {
     if (cached && cached.expires > Date.now()) return { ok: true, login: cached.login };
     this.#cache.delete(hash);
 
-    const user = await this.#github.user(token);
+    const user = await this.#github.tokenUser(token);
     if (!user) return { ok: false, reason: 'invalid-token' };
     if (!(await this.#github.isTeamMember(user.login))) {
       return { ok: false, reason: 'not-member', login: user.login, revoked: await this.#github.revoke(token) };

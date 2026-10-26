@@ -16,6 +16,7 @@ describe('logs', () => {
     await app.upload(token, 'nota.svg', Buffer.from(`<svg>${marker}</svg>`));
     await app.upload(app.github.tokenFor('mallory'), 'nota.txt', Buffer.from(`${marker}\n`));
     await app.upload('ghu_not-a-real-token-123', 'nota.txt', Buffer.from(`${marker}\n`));
+    await app.upload(app.github.tokenFor('ana', { otherApp: true }), 'nota.txt', Buffer.from(`${marker}\n`));
     await app.list(token);
     await fetch(`${app.url}/cms-api/callback?code=code-not-to-log-42&state=state-not-to-log-42`);
   });
