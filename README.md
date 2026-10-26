@@ -95,7 +95,12 @@ and nothing is ever deleted.
 Refused: anything else (SVG, HTML, XML, scripts, executables, archives…), names without an extension (only the last
 one counts: `foto.jpg.html` is HTML, and `x.html.pdf` is checked as a PDF and stored as `x-html.pdf`), and office files with macros or embedded content in any name: `vbaProject.bin`,
 macro-enabled content types (xlsm, docm, pptm, also renamed), Excel 4 macro sheets, ActiveX controls, OLE objects,
-embedded office files, and ODF `Basic/` or `Scripts/`. The client's `Content-Type` is ignored.
+embedded office files, and ODF `Basic/` or `Scripts/`; also in the OOXML relationships (`.rels`: VBA, OLE objects,
+ActiveX, embedded packages, attached templates, add-ins; any external target but a hyperlink) and in the ODF manifest
+(Basic, scripts and OLE objects by path or media type). Office files are also refused when an entry name could read
+differently in another zip reader (a Unicode path field, a local header that differs, an encoded name, two names that
+differ only in case), or when the XML read is not plain UTF-8 or holds character or entity references beyond the
+predefined five. The client's `Content-Type` is ignored.
 
 **List.** `GET /cms-api/media?limit=100&cursor=…` (`limit` 1 to 1000, default 100):
 
@@ -278,7 +283,7 @@ GetObject and AbortMultipartUpload on `sobre-media/media/*`, ListBucket with pre
 | The token is posted to another window | `postMessage` targets only `CMS_ORIGIN`, after a handshake from the opener at that origin; the popup's CSP allows only its own script. |
 | Another site drives the media API from an editor's browser | The API needs a bearer token (no cookies); `Origin` must be the CMS origin on POST; `Sec-Fetch-Site` must be same-origin. |
 | A file that runs as a page, or a script, on the site's origin | An extension list without SVG, HTML or XML; the content must match the extension; text must not start with `<`; cms-gate sets the `Content-Type` itself; the media vhost sends `nosniff` and a sandbox CSP. |
-| An office file with macros | Refused by content (not by name): VBA, macro content types, macro sheets, ActiveX, OLE and embedded office files, ODF scripts. |
+| An office file with macros | Refused by content (not by name): VBA, macro content types, macro sheets, ActiveX, OLE and embedded office files, ODF scripts, in the entry names, content types, relationships and manifest; entry names must read the same in every zip reader, and the XML must be plain. |
 | Overwriting or deleting a published file | Keys chosen by the server; `If-None-Match: *` on each write; no delete call exists, and the S3 key can't delete; the bucket is versioned. |
 | Path tricks in names | The name is reduced to a slug; the key is always `<prefix>YYYY/MM/<slug>.<ext>`. |
 | Floods and large bodies | Rate limits per address and per login; body limit in Caddy and in cms-gate; four uploads at once; request timeouts. |
