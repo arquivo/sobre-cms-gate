@@ -1,0 +1,15 @@
+.git
+.github
+.npm
+node_modules
+dist
+test
+scripts
+*.md
+.env
+.env.*
+secrets
+*.pem
+docker-compose.yml
+Dockerfile
+.dockerignore

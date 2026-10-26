@@ -1,0 +1,44 @@
+# Example deployment on the CMS host, behind Caddy. Reachable on 127.0.0.1:8787 only.
+#
+#   cp .env.example .env            # and fill it in
+#   mkdir -m 700 secrets            # put the four secret files in it (see `secrets:` below),
+#                                   # readable by uid 1000, the container's user
+#   docker compose up -d
+services:
+  cms-gate:
+    image: arquivo/sobre-cms-gate:latest
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      LISTEN_HOST: 0.0.0.0
+      LISTEN_PORT: "8787"
+      GITHUB_CLIENT_SECRET_FILE: /run/secrets/github_client_secret
+      GITHUB_PRIVATE_KEY_FILE: /run/secrets/github_private_key
+      S3_ACCESS_KEY_ID_FILE: /run/secrets/s3_access_key_id
+      S3_SECRET_ACCESS_KEY_FILE: /run/secrets/s3_secret_access_key
+    secrets:
+      - github_client_secret
+      - github_private_key
+      - s3_access_key_id
+      - s3_secret_access_key
+    ports:
+      - "127.0.0.1:8787:8787"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    # Uploads are held in memory while they are checked: about three times the file size each, at most four at once.
+    mem_limit: 1g
+    pids_limit: 128
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "5" }
+
+secrets:
+  github_client_secret:
+    file: ./secrets/github-client-secret
+  github_private_key:
+    file: ./secrets/github-app.private-key.pem
+  s3_access_key_id:
+    file: ./secrets/s3-access-key-id
+  s3_secret_access_key:
+    file: ./secrets/s3-secret-access-key
