@@ -99,8 +99,14 @@ embedded office files, and ODF `Basic/` or `Scripts/`; also in the OOXML relatio
 ActiveX, embedded packages, attached templates, add-ins; any external target but a hyperlink) and in the ODF manifest
 (Basic, scripts and OLE objects by path or media type). Office files are also refused when an entry name could read
 differently in another zip reader (a Unicode path field, a local header that differs, an encoded name, two names that
-differ only in case), or when the XML read is not plain UTF-8 or holds character or entity references beyond the
-predefined five. The client's `Content-Type` is ignored.
+differ only in case), when the zip's structure could be read two ways (ZIP64 records, an entry count or directory
+size that doesn't match the directory), or when the XML read is not plain UTF-8, holds character or entity references
+beyond the predefined five, or has a DTD (any in OOXML; one with declarations of its own in the ODF manifest). The
+client's `Content-Type` is ignored.
+
+So some ordinary office files are refused too, with a message that suggests saving them as PDF: a docx or pptx with a
+native chart (its workbook is embedded), a document still linked to its template or to an image file, and files whose
+generator writes character references (`&#10;`) in the parts read. An upload of a chart can be a PDF or an image.
 
 **List.** `GET /cms-api/media?limit=100&cursor=…` (`limit` 1 to 1000, default 100):
 
@@ -277,13 +283,13 @@ GetObject and AbortMultipartUpload on `sobre-media/media/*`, ListBucket with pre
 | --- | --- |
 | Someone outside the VPN or office reaches the CMS | Caddy's `remote_ip` allowlist (and the firewall); cms-gate listens on 127.0.0.1 only. |
 | A GitHub user who is not an editor signs in | The team check at sign-in, with the App's own installation token; the token is revoked and never sent to the browser. |
-| An editor's token from another App or tool is used on the media API | Only this App's user tokens are accepted: GitHub's token check, with the App's client id and secret. |
+| An editor's token from another App or tool is used on the media API | Only this App's user tokens are accepted: GitHub's token check, with the App's client id and secret. A token not shaped like one (`ghu_…`) is refused without asking GitHub, so made-up tokens don't spend the App's rate limit. |
 | An ex-editor keeps using an old token | The team check on each upload and list (cached 5 minutes at most); the token is revoked once the check fails; tokens expire after 8 hours. |
 | Login CSRF, or a forged callback | The state cookie (`__Host-`, `HttpOnly`, 10 minutes), compared in constant time and cleared on every callback. |
 | The token is posted to another window | `postMessage` targets only `CMS_ORIGIN`, after a handshake from the opener at that origin; the popup's CSP allows only its own script. |
 | Another site drives the media API from an editor's browser | The API needs a bearer token (no cookies); `Origin` must be the CMS origin on POST; `Sec-Fetch-Site` must be same-origin. |
 | A file that runs as a page, or a script, on the site's origin | An extension list without SVG, HTML or XML; the content must match the extension; text must not start with `<`; cms-gate sets the `Content-Type` itself; the media vhost sends `nosniff` and a sandbox CSP. |
-| An office file with macros | Refused by content (not by name): VBA, macro content types, macro sheets, ActiveX, OLE and embedded office files, ODF scripts, in the entry names, content types, relationships and manifest; entry names must read the same in every zip reader, and the XML must be plain. |
+| An office file with macros | Refused by content (not by name): VBA, macro content types, macro sheets, ActiveX, OLE and embedded office files, ODF scripts, in the entry names, content types, relationships and manifest; entry names and the zip's structure must read the same in every zip reader, and the XML must be plain; the relationships and manifest are also checked value by value, whatever their elements' prefix. |
 | Overwriting or deleting a published file | Keys chosen by the server; `If-None-Match: *` on each write; no delete call exists, and the S3 key can't delete; the bucket is versioned. |
 | Path tricks in names | The name is reduced to a slug; the key is always `<prefix>YYYY/MM/<slug>.<ext>`. |
 | Floods and large bodies | Rate limits per address and per login; body limit in Caddy and in cms-gate; four uploads at once; request timeouts. |

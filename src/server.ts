@@ -73,7 +73,7 @@ const ERRORS = {
   'too-large': [413, 'O ficheiro é demasiado grande.'],
   'type-not-allowed': [415, 'Este tipo de ficheiro não é aceite.'],
   'content-mismatch': [422, 'O conteúdo do ficheiro não corresponde à extensão.'],
-  macro: [422, 'O ficheiro tem macros ou objetos incorporados, que não são aceites.'],
+  macro: [422, 'O ficheiro tem macros, objetos incorporados ou ligações a outros ficheiros (um modelo, um gráfico, uma imagem ligada), que não são aceites. Pode guardá-lo como PDF.'],
   'not-text': [422, 'O ficheiro não é texto UTF-8.'],
   empty: [422, 'O ficheiro está vazio.'],
   'no-free-name': [409, 'Já existem demasiados ficheiros com este nome este mês. Mude o nome do ficheiro.'],
