@@ -84,7 +84,7 @@ export async function startStubGitHub(o: StubGitHubOptions): Promise<StubGitHub>
     failWith: {},
     checkClientId: undefined,
     tokenFor(login, t = {}) {
-      const token = `ghu_${randomBytes(18).toString('base64url')}`;
+      const token = `ghu_${randomBytes(18).toString('hex')}`; // 36 characters, as GitHub's
       this.tokens.set(token, login);
       if (t.otherApp) otherApp.add(token);
       if (!ids.has(login)) ids.set(login, ids.size + 1000);

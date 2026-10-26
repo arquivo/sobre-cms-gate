@@ -13,7 +13,7 @@ describe('media uploads', () => {
   let app: App;
   let token: string;
   before(async () => {
-    app = await startApp({ now: () => NOW, env: { MAX_UPLOAD_BYTES: '65536' } });
+    app = await startApp({ now: () => NOW, env: { MAX_UPLOAD_BYTES: '65536', RATE_UPLOADS_PER_HOUR: '1000', RATE_REQUESTS_PER_MINUTE: '1000' } });
     app.github.members.set('ana', 'active');
     token = app.github.tokenFor('ana');
   });
@@ -193,6 +193,16 @@ describe('media uploads', () => {
       app.github.checkClientId = undefined;
     }
     assert.equal(app.s3.objects.size, 0);
+  });
+
+  test('a token not shaped like an App user token is refused without asking GitHub', async () => {
+    const before = app.github.calls.length;
+    for (const made of ['x', `gho_${'a'.repeat(36)}`, 'ghu_short', `ghu_${'a'.repeat(35)}-`]) {
+      const res = await app.upload(made, 'logo.png', png);
+      assert.equal(res.status, 401, made);
+      assert.equal(((await res.json()) as { error: string }).error, 'invalid-token');
+    }
+    assert.equal(app.github.calls.length, before);
   });
 
   test('the form must hold one file, in the field "file"', async () => {
