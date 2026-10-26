@@ -2,6 +2,7 @@
   "name": "sobre-cms-gate",
   "version": "0.1.0",
   "private": true,
+  "license": "GPL-3.0-only",
   "description": "Sign-in (GitHub App) and media uploads for the sobre.arquivo.pt CMS (Decap)",
   "type": "module",
   "engines": {

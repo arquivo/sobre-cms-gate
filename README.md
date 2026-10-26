@@ -367,3 +367,7 @@ configuration checks, the health check holding no secret, and the logs holding n
 | pull request | built and smoke-tested, not pushed |
 
 Actions are pinned by commit, and the jobs have read-only permissions.
+
+## License
+
+[GNU General Public License v3.0](LICENSE) (`GPL-3.0-only`).
