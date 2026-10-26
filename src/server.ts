@@ -2,6 +2,7 @@
 // (`/cms-api/media`) and a health check. No session is kept: every media request carries the editor's GitHub token.
 import http from 'node:http';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
+import { isIP } from 'node:net';
 import type { Config } from './config.ts';
 import { Editors } from './editors.ts';
 import { checkFile, type Refusal } from './filetypes.ts';
@@ -152,12 +153,13 @@ export function createServer(config: Config, deps: Deps): http.Server {
   };
   let uploading = 0;
 
-  /** The client's address, for the rate limits: the last X-Forwarded-For entry is the one Caddy added. */
+  /** The client's address, for the rate limits: the last X-Forwarded-For entry, the one Caddy wrote (it sets the
+   * header to the client address alone), if it is an IP address; else the peer's. Only Caddy reaches the port. */
   const clientAddress = (req: http.IncomingMessage): string => {
     if (config.trustProxy) {
       const header = req.headers['x-forwarded-for'];
       const last = (Array.isArray(header) ? header.join(',') : header)?.split(',').pop()?.trim();
-      if (last) return last;
+      if (last && isIP(last)) return last;
     }
     return req.socket.remoteAddress ?? 'unknown';
   };

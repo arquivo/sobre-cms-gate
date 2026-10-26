@@ -22,7 +22,8 @@ export interface Config {
   /** `<cmsOrigin>/cms-api/callback`, as registered on the GitHub App. */
   callbackUrl: string;
   listen: { host: string; port: number };
-  /** Take the client address from the last `X-Forwarded-For` entry (set by Caddy), for the rate limits. */
+  /** Take the client address, for the rate limits, from the last `X-Forwarded-For` entry if it is an IP address (Caddy
+   * sets the header to the client address alone). */
   trustProxy: boolean;
   s3: {
     endpoint: URL;

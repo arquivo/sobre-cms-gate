@@ -159,7 +159,7 @@ the list of problems if anything is missing or inconsistent. `.env.example` has 
 | `S3_CA_FILE` | none | PEM bundle for an RGW certificate signed by a private CA (it replaces the system CAs). |
 | `LISTEN_HOST` | `127.0.0.1` | The image sets `0.0.0.0`, for the container's port published on 127.0.0.1. Any non-loopback address logs a warning. |
 | `LISTEN_PORT` | `8787` | |
-| `TRUST_PROXY` | `true` | Take the client address, for the rate limits, from the last `X-Forwarded-For` entry (Caddy's). |
+| `TRUST_PROXY` | `true` | Take the client address, for the rate limits, from the last `X-Forwarded-For` entry (Caddy's), if it is an IP address; else, or with `false`, the peer's. |
 | `MAX_UPLOAD_BYTES` | `52428800` (50 MiB) | Keep Caddy's `max_size` a little above it. |
 | `RATE_SIGNINS_PER_MINUTE` | `10` | Per client address. |
 | `RATE_REQUESTS_PER_MINUTE` | `120` | Per client address, all routes but health. |
@@ -199,15 +199,21 @@ handle /cms-api/* {
 	request_body {
 		max_size 51MiB
 	}
-	reverse_proxy 127.0.0.1:8787
+	reverse_proxy 127.0.0.1:8787 {
+		header_up X-Forwarded-For {client_ip}
+	}
 }
 ```
 
 `max_size` must be a little above `MAX_UPLOAD_BYTES` (the multipart wrapping adds a few hundred bytes); cms-gate
-refuses anything over `MAX_UPLOAD_BYTES` plus 64 KiB itself. Caddy sets `X-Forwarded-For` to the client address (it
-ignores the client's own header unless the client is in `trusted_proxies`), and cms-gate takes the last entry. The
-production and staging vhosts answer 404 for `/cms-api/`. Caddy should not add its own CSP or caching headers to
-`/cms-api/*`: cms-gate sets them.
+refuses anything over `MAX_UPLOAD_BYTES` plus 64 KiB itself. Caddy sets `X-Forwarded-For` to the client address
+alone: `header_up X-Forwarded-For {client_ip}`, as in static-sobre's `sobre-cms` snippet. `{client_ip}` is the address
+that the vhost's allowlist checks too: the peer's, or with a load balancer listed in `trusted_proxies`, the one the
+balancer gives (see static-sobre's `docs/runbooks/deploy.md`). cms-gate takes the last `X-Forwarded-For` entry, the
+only one Caddy sends, as the address for the rate limits, if it is an IP address; otherwise it takes the peer's, which
+inside the container is the Docker bridge, so all such requests share one limit. The port is published on 127.0.0.1
+only: no one off the host can reach cms-gate and set that header. The production and staging vhosts answer 404 for
+`/cms-api/`. Caddy should not add its own CSP or caching headers to `/cms-api/*`: cms-gate sets them.
 
 ### Decap (static-sobre's `src/lib/cms.ts`)
 
@@ -298,8 +304,8 @@ own GitHub account can also change code (D15).
   when the caller's ListBucket doesn't apply, and the key's ListBucket is limited to the prefix `media/`. The real guard
   is `If-None-Match: *` on the PUT, answered 412 or 409 when the key exists. **Check on the RGW** that it honours
   `If-None-Match: *` on PutObject, and how it answers a HEAD on a missing key with this policy.
-- **Client address.** The rightmost `X-Forwarded-For` entry is used, because inside the container the peer is the
-  Docker bridge, not Caddy's loopback address.
+- **Client address.** The rightmost `X-Forwarded-For` entry is used, the one Caddy writes, rather than the peer's
+  address checked against Caddy's: inside the container the peer is the Docker bridge, not Caddy's loopback address.
 - **No ClamAV scan** (optional in the spec).
 - **Memory.** An upload is held in memory while it is checked, about three times its size, with four at most at once:
   hence the 1 GiB limit in Compose.

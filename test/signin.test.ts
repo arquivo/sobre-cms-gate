@@ -205,4 +205,19 @@ describe('sign-in rate limit', () => {
       await app.close();
     }
   });
+
+  test('an X-Forwarded-For entry that is not an address counts as the peer', async () => {
+    const app = await startApp({ env: { RATE_SIGNINS_PER_MINUTE: '2' } });
+    try {
+      const start = (xff: string) => fetch(`${app.url}/cms-api/auth`, { redirect: 'manual', headers: { 'x-forwarded-for': xff } });
+      assert.equal((await start('unknown')).status, 302);
+      assert.equal((await start('192.0.2.1, ')).status, 302);
+      assert.equal((await start('192.0.2.1, 192.0.2.300')).status, 429, 'all three are the peer');
+      assert.equal((await start('192.0.2.1')).status, 302);
+      const ip = app.events().find((e) => e.event === 'rate-limited')?.ip;
+      assert.ok(ip === '127.0.0.1' || ip === '::ffff:127.0.0.1', String(ip));
+    } finally {
+      await app.close();
+    }
+  });
 });
