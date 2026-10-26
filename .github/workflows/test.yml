@@ -1,0 +1,38 @@
+name: Test
+
+# Typecheck, tests (with no network), build and audit, in the same pinned Node image as development
+# (scripts/dev.sh). Called by the Docker workflow, which publishes only if this passes; can also be run by hand.
+on:
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install dependencies
+        run: scripts/dev.sh npm ci --no-audit
+
+      - name: Typecheck
+        run: scripts/dev.sh npm run typecheck
+
+      - name: Test (no network)
+        run: NETWORK=none scripts/dev.sh npm test
+
+      - name: Build
+        run: scripts/dev.sh npm run build
+
+      - name: Audit dependencies
+        run: scripts/dev.sh npm audit --audit-level=low
+
+      - name: Lockfile unchanged
+        run: git diff --exit-code package-lock.json
