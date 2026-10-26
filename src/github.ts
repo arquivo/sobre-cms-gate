@@ -21,6 +21,13 @@ export interface GitHubUser {
 
 const b64url = (data: string | Buffer) => Buffer.from(data).toString('base64url');
 
+/** The JSON object of an answer; a GitHubError if the body can't be read or is anything else. */
+async function readJson(res: Response, what: string): Promise<Record<string, unknown>> {
+  const data: unknown = await res.json().catch(() => null);
+  if (typeof data !== 'object' || data === null || Array.isArray(data)) throw new GitHubError(`${what} returned no JSON object (${res.status})`);
+  return data as Record<string, unknown>;
+}
+
 export class GitHub {
   readonly #config: Config['github'];
   readonly #callbackUrl: string;
@@ -53,7 +60,7 @@ export class GitHub {
         redirect_uri: this.#callbackUrl,
       }),
     });
-    const data = res.ok ? ((await res.json().catch(() => null)) as { access_token?: unknown } | null) : null;
+    const data = res.ok ? await readJson(res, 'code exchange') : null;
     if (typeof data?.access_token !== 'string' || !data.access_token) {
       throw new GitHubError(`code exchange failed (${res.status})`);
     }
@@ -65,7 +72,7 @@ export class GitHub {
     const res = await this.#fetch(new URL('/user', this.#config.apiUrl), { headers: { ...API_HEADERS, authorization: `Bearer ${token}` } });
     if (res.status === 401 || res.status === 403) return null;
     if (!res.ok) throw new GitHubError(`GET /user failed (${res.status})`);
-    const data = (await res.json()) as { login?: unknown; id?: unknown };
+    const data = await readJson(res, 'GET /user');
     if (typeof data.login !== 'string' || !LOGIN.test(data.login) || typeof data.id !== 'number') {
       throw new GitHubError('GET /user returned an unexpected user');
     }
@@ -82,7 +89,7 @@ export class GitHub {
     });
     if (res.status === 404) return false;
     if (!res.ok) throw new GitHubError(`team membership check failed (${res.status})`);
-    const data = (await res.json()) as { state?: unknown };
+    const data = await readJson(res, 'team membership check');
     return data.state === 'active';
   }
 
@@ -109,7 +116,7 @@ export class GitHub {
       headers: { ...API_HEADERS, authorization: `Bearer ${this.#appJwt()}`, 'content-type': 'application/json' },
       body: JSON.stringify({ permissions: { members: 'read' } }),
     });
-    const data = res.ok ? ((await res.json()) as { token?: unknown; expires_at?: unknown }) : null;
+    const data = res.ok ? await readJson(res, 'installation token request') : null;
     const expires = typeof data?.expires_at === 'string' ? Date.parse(data.expires_at) : NaN;
     if (typeof data?.token !== 'string' || !data.token || Number.isNaN(expires)) {
       throw new GitHubError(`installation token request failed (${res.status})`);

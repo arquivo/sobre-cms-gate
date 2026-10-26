@@ -31,8 +31,8 @@ export interface StubGitHub {
   refreshTokens: string[];
   /** The login that the next authorize will sign in. */
   nextLogin: string;
-  /** Status codes to answer instead, by endpoint. */
-  failWith: Partial<Record<'token' | 'user' | 'membership' | 'installation' | 'revoke', number>>;
+  /** Status codes to answer instead, by endpoint; `not-json` is a 200 with an HTML body. */
+  failWith: Partial<Record<'token' | 'user' | 'membership' | 'installation' | 'revoke', number | 'not-json'>>;
   /** A user token, as if the user had signed in. */
   tokenFor(login: string): string;
   close(): Promise<void>;
@@ -41,6 +41,18 @@ export interface StubGitHub {
 const json = (res: http.ServerResponse, status: number, data: unknown) => {
   res.writeHead(status, { 'content-type': 'application/json' });
   res.end(JSON.stringify(data));
+};
+
+/** Answers the failure asked for, if any. */
+const failed = (res: http.ServerResponse, failure: number | 'not-json' | undefined) => {
+  if (failure === undefined) return false;
+  if (failure === 'not-json') {
+    res.writeHead(200, { 'content-type': 'text/html' });
+    res.end('<html><body>Unicorn!</body></html>');
+  } else {
+    json(res, failure, { message: 'stub failure' });
+  }
+  return true;
 };
 
 function verifyJwt(jwt: string, key: KeyObject, appId: string): boolean {
@@ -95,7 +107,7 @@ export async function startStubGitHub(o: StubGitHubOptions): Promise<StubGitHub>
     }
 
     if (req.method === 'POST' && path === '/login/oauth/access_token') {
-      if (stub.failWith.token) return json(res, stub.failWith.token, { error: 'stub failure' });
+      if (failed(res, stub.failWith.token)) return;
       const data = JSON.parse(body.toString() || '{}') as Record<string, string>;
       const login = data.code ? codes.get(data.code) : undefined;
       if (data.client_id !== o.clientId || data.client_secret !== o.clientSecret || !login) {
@@ -108,7 +120,7 @@ export async function startStubGitHub(o: StubGitHubOptions): Promise<StubGitHub>
     }
 
     if (req.method === 'GET' && path === '/user') {
-      if (stub.failWith.user) return json(res, stub.failWith.user, { message: 'stub failure' });
+      if (failed(res, stub.failWith.user)) return;
       const login = bearer ? stub.tokens.get(bearer) : undefined;
       if (!login || stub.revoked.includes(bearer ?? '')) return json(res, 401, { message: 'Bad credentials' });
       return json(res, 200, { login, id: ids.get(login) });
@@ -117,7 +129,7 @@ export async function startStubGitHub(o: StubGitHubOptions): Promise<StubGitHub>
     const membership = path.match(/^\/orgs\/([^/]+)\/teams\/([^/]+)\/memberships\/([^/]+)$/);
     if (req.method === 'GET' && membership) {
       if (!bearer || !installation.has(bearer)) return json(res, 401, { message: 'Bad credentials' });
-      if (stub.failWith.membership) return json(res, stub.failWith.membership, { message: 'stub failure' });
+      if (failed(res, stub.failWith.membership)) return;
       const [, org, team, login = ''] = membership;
       const state = org === o.org && team === o.team ? stub.members.get(decodeURIComponent(login)) : undefined;
       return state ? json(res, 200, { state, role: 'member' }) : json(res, 404, { message: 'Not Found' });
@@ -125,7 +137,7 @@ export async function startStubGitHub(o: StubGitHubOptions): Promise<StubGitHub>
 
     if (req.method === 'POST' && path === `/app/installations/${o.installationId}/access_tokens`) {
       if (!bearer || !verifyJwt(bearer, o.publicKey, o.appId)) return json(res, 401, { message: 'bad JWT' });
-      if (stub.failWith.installation) return json(res, stub.failWith.installation, { message: 'stub failure' });
+      if (failed(res, stub.failWith.installation)) return;
       const token = `ghs_${randomBytes(18).toString('base64url')}`;
       installation.add(token);
       stub.installationTokens.push({ token, permissions: (JSON.parse(body.toString() || '{}') as { permissions?: unknown }).permissions });
@@ -135,7 +147,7 @@ export async function startStubGitHub(o: StubGitHubOptions): Promise<StubGitHub>
     if (req.method === 'DELETE' && path === `/applications/${o.clientId}/token`) {
       const basic = Buffer.from(`${o.clientId}:${o.clientSecret}`).toString('base64');
       if (req.headers.authorization !== `Basic ${basic}`) return json(res, 401, { message: 'Bad credentials' });
-      if (stub.failWith.revoke) return json(res, stub.failWith.revoke, { message: 'stub failure' });
+      if (failed(res, stub.failWith.revoke)) return;
       const token = (JSON.parse(body.toString() || '{}') as { access_token?: string }).access_token ?? '';
       if (!stub.tokens.has(token)) return json(res, 404, { message: 'Not Found' });
       stub.revoked.push(token);

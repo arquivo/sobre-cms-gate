@@ -52,7 +52,8 @@ for the two sign-in pages only their own inline script and style, by hash.
 4. A member gets a page that runs Decap's handshake: it posts `authorizing:github` to `window.opener`, waits for the
    opener's answer from the CMS origin, and posts `authorization:github:success:{"token":…,"provider":"github"}`,
    always with the CMS origin as the target. Anyone else gets a page in Portuguese that posts
-   `authorization:github:error:{"message":…}`, with no token, and a non-member's token is revoked.
+   `authorization:github:error:{"message":…}`, with no token, and a non-member's token is revoked. Any failure,
+   GitHub's or an unexpected one, ends on that page too.
 
 ### Media API
 
@@ -118,7 +119,7 @@ When `cursor` is not null, pass it back to get the next page. Only keys under `S
 | 415 | `type-not-allowed`, `unsupported-media-type` | extension not on the list; body not multipart |
 | 422 | `content-mismatch`, `macro`, `not-text`, `empty` | the content check failed |
 | 429 | `rate-limited` | with `Retry-After` |
-| 502 | `github-unavailable`, `storage-unavailable` | GitHub or the RGW failed |
+| 502 | `github-unavailable`, `storage-unavailable` | GitHub or the RGW failed, or GitHub's answer was not the JSON expected |
 | 503 | `busy` | four uploads already running (`Retry-After: 5`) |
 
 ### Logs

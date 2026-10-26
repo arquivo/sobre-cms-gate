@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import vm from 'node:vm';
 import { after, before, beforeEach, describe, test } from 'node:test';
+import { GitHub } from '../src/github.ts';
 import { PAGE_CSP, POPUP_SCRIPT } from '../src/pages.ts';
 import { CMS_ORIGIN, pageData, startApp, type App } from './helpers/app.ts';
 
@@ -145,27 +146,48 @@ describe('sign-in', () => {
   test('GitHub failures give an error page without a token', async () => {
     app.github.members.set('ana', 'active');
     for (const failure of ['token', 'user', 'membership'] as const) {
-      app.github.failWith = { [failure]: 500 };
-      const { response, token } = await app.signIn('ana');
-      assert.equal(response.status, 502, failure);
+      for (const answer of [500, 'not-json'] as const) {
+        app.github.failWith = { [failure]: answer };
+        const { response, token, message } = await app.signIn('ana');
+        assert.equal(response.status, 502, `${failure} ${answer}`);
+        assert.equal(token, null);
+        assert.match(message ?? '', /^authorization:github:error:/);
+        assert.match(response.headers.getSetCookie()[0] ?? '', /Max-Age=0/);
+      }
+    }
+  });
+
+  test('an unexpected error gives an error page too', async () => {
+    const exchange = GitHub.prototype.exchangeCode;
+    GitHub.prototype.exchangeCode = () => Promise.reject(new TypeError('unexpected'));
+    try {
+      const { response, token, message } = await app.signIn('ana');
+      assert.equal(response.status, 500);
       assert.equal(token, null);
+      assert.match(message ?? '', /^authorization:github:error:/);
+      assert.match(response.headers.getSetCookie()[0] ?? '', /Max-Age=0/);
+      assert.equal(response.headers.get('content-security-policy'), PAGE_CSP);
+    } finally {
+      GitHub.prototype.exchangeCode = exchange;
     }
   });
 });
 
 describe('sign-in without an installation token', () => {
-  test('a failed installation token request gives an error page', async () => {
-    const app = await startApp();
-    try {
-      app.github.members.set('ana', 'active');
-      app.github.failWith = { installation: 500 };
-      const { response, token } = await app.signIn('ana');
-      assert.equal(response.status, 502);
-      assert.equal(token, null);
-    } finally {
-      await app.close();
-    }
-  });
+  for (const answer of [500, 'not-json'] as const) {
+    test(`a failed installation token request (${answer}) gives an error page`, async () => {
+      const app = await startApp();
+      try {
+        app.github.members.set('ana', 'active');
+        app.github.failWith = { installation: answer };
+        const { response, token } = await app.signIn('ana');
+        assert.equal(response.status, 502);
+        assert.equal(token, null);
+      } finally {
+        await app.close();
+      }
+    });
+  }
 });
 
 describe('sign-in rate limit', () => {

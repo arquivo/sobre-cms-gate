@@ -82,6 +82,7 @@ export const MESSAGES = {
   ],
   denied: ['Início de sessão cancelado', 'O GitHub não autorizou o início de sessão. Feche esta janela e tente de novo.'],
   github: ['Erro no início de sessão', 'Não foi possível confirmar a conta no GitHub. Tente de novo dentro de momentos.'],
+  internal: ['Erro no início de sessão', 'Ocorreu um erro inesperado. Feche esta janela e tente de novo dentro de momentos.'],
   rateLimited: ['Demasiadas tentativas', 'Houve demasiadas tentativas de início de sessão. Aguarde um minuto e tente de novo.'],
   badRequest: ['Pedido inválido', 'Este endereço só é usado pelo editor do sobre.arquivo.pt.'],
 } as const satisfies Record<string, readonly [string, string]>;

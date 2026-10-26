@@ -204,6 +204,18 @@ describe('media uploads', () => {
     assert.deepEqual(Object.keys((await res.json()) as object).sort(), ['error', 'message']);
   });
 
+  test('an answer from GitHub that is not JSON is reported as GitHub unavailable', async () => {
+    app.github.failWith = { user: 'not-json' };
+    try {
+      const res = await app.upload(app.github.tokenFor('ana'), 'logo.png', png);
+      assert.equal(res.status, 502);
+      assert.equal(((await res.json()) as { error: string }).error, 'github-unavailable');
+      assert.equal(app.s3.objects.size, 0);
+    } finally {
+      app.github.failWith = {};
+    }
+  });
+
   test('there is no delete, and nothing else is routed', async () => {
     const del = await fetch(`${app.url}/cms-api/media`, { method: 'DELETE', headers: { origin: CMS_ORIGIN, authorization: `Bearer ${token}` } });
     assert.equal(del.status, 405);

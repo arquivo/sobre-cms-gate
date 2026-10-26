@@ -185,22 +185,23 @@ export function createServer(config: Config, deps: Deps): http.Server {
     const page = (status: number, html: string) => sendPage(res, status, html, { 'set-cookie': clearState });
     const refuse = (status: number, [title, text]: readonly [string, string]) => page(status, errorPage(config.cmsOrigin, title, text));
 
-    const expected = readCookie(req, STATE_COOKIE);
-    const state = query.get('state');
-    if (!expected || !state || !safeEqual(expected, state)) {
-      log({ event: 'sign-in', result: 'bad-state' });
-      return refuse(400, MESSAGES.badState);
-    }
-    if (query.has('error')) {
-      log({ event: 'sign-in', result: 'denied' });
-      return refuse(403, MESSAGES.denied);
-    }
-    const code = query.get('code');
-    if (!code || code.length > 512) {
-      log({ event: 'sign-in', result: 'bad-request' });
-      return refuse(400, MESSAGES.badRequest);
-    }
+    // Whatever goes wrong, the popup ends on an error page, with the state cookie cleared.
     try {
+      const expected = readCookie(req, STATE_COOKIE);
+      const state = query.get('state');
+      if (!expected || !state || !safeEqual(expected, state)) {
+        log({ event: 'sign-in', result: 'bad-state' });
+        return refuse(400, MESSAGES.badState);
+      }
+      if (query.has('error')) {
+        log({ event: 'sign-in', result: 'denied' });
+        return refuse(403, MESSAGES.denied);
+      }
+      const code = query.get('code');
+      if (!code || code.length > 512) {
+        log({ event: 'sign-in', result: 'bad-request' });
+        return refuse(400, MESSAGES.badRequest);
+      }
       const token = await github.exchangeCode(code);
       const verdict = await editors.check(token);
       if (verdict.ok) {
@@ -210,9 +211,10 @@ export function createServer(config: Config, deps: Deps): http.Server {
       log({ event: 'sign-in', result: verdict.reason, login: verdict.login ?? null, revoked: verdict.revoked ?? null });
       return refuse(verdict.reason === 'not-member' ? 403 : 502, verdict.reason === 'not-member' ? MESSAGES.notMember : MESSAGES.github);
     } catch (e) {
-      if (!(e instanceof GitHubError)) throw e;
-      log({ event: 'sign-in', result: 'error', error: e.message });
-      return refuse(502, MESSAGES.github);
+      const known = e instanceof GitHubError;
+      log({ event: 'sign-in', result: 'error', error: known ? e.message : e instanceof Error ? e.name : 'unknown' });
+      if (res.headersSent) throw e;
+      return known ? refuse(502, MESSAGES.github) : refuse(500, MESSAGES.internal);
     }
   };
 
