@@ -130,24 +130,44 @@ function plainName(data: Buffer, entry: yauzl.Entry): boolean {
   if (name !== entry.fileName || /[\u0000-\u001f\u007f]/.test(name) || (!utf8 && /[^\x20-\x7e]/.test(name))) return false;
   if (entry.extraFields.some((f) => f.id === 0x7075) || decodeName(name) !== name) return false;
   const at = entry.relativeOffsetOfLocalHeader;
-  if (at + 30 > data.length) return false;
+  if (at + 30 > data.length || data.readUInt32LE(at) !== 0x04034b50) return false;
   const local = data.subarray(at + 30, at + 30 + data.readUInt16LE(at + 26));
   return local.equals(raw) && (data.readUInt16LE(at + 6) & 0x800) === (entry.generalPurposeBitFlag & 0x800);
+}
+
+/** The end of central directory record, if there is one, it ends the file, and it gives the directory alone: no
+ * ZIP64 (never needed under the size limit), one disk, and the directory right before it. Zip readers that find
+ * the directory in other ways then all find the same one. */
+function endRecord(data: Buffer): { entries: number; size: number } | null {
+  for (let at = data.length - 22; at >= Math.max(0, data.length - 22 - 0xffff); at--) {
+    if (data.readUInt32LE(at) !== 0x06054b50 || at + 22 + data.readUInt16LE(at + 20) !== data.length) continue;
+    const [disk, startDisk, onDisk, entries] = [4, 6, 8, 10].map((o) => data.readUInt16LE(at + o)) as [number, number, number, number];
+    const size = data.readUInt32LE(at + 12);
+    const offset = data.readUInt32LE(at + 16);
+    const zip64 = at >= 20 && data.readUInt32LE(at - 20) === 0x07064b50;
+    if (zip64 || disk !== 0 || startDisk !== 0 || onDisk !== entries || entries === 0xffff || offset + size !== at) return null;
+    return { entries, size };
+  }
+  return null;
 }
 
 /** The entry names of a zip, and the content of the `wanted` entries (up to MAX_PART each, MAX_READ in all); null if
  * it can't be read, or if its names are ambiguous (see plainName, and no two names that differ only in case). */
 async function readZip(data: Buffer, wanted: (name: string) => boolean): Promise<Zip | null> {
   if (!startsWith(data, 0x50, 0x4b, 0x03, 0x04)) return null;
+  const end = endRecord(data);
+  if (!end) return null;
   try {
     const zip = await yauzl.fromBufferPromise(data, { lazyEntries: true, autoClose: false, validateEntrySizes: true, strictFileNames: true });
     const names: string[] = [];
     const seen = new Set<string>();
     const parts = new Map<string, Buffer>();
     let read = 0;
+    let directory = 0;
     try {
       for await (const entry of zip.eachEntry()) {
         if (names.length >= MAX_ENTRIES || entry.isEncrypted() || !plainName(data, entry)) return null;
+        directory += 46 + entry.fileNameLength + entry.extraFieldLength + entry.fileCommentLength;
         const folded = entry.fileName.toLowerCase();
         if (seen.has(folded)) return null;
         seen.add(folded);
@@ -163,15 +183,16 @@ async function readZip(data: Buffer, wanted: (name: string) => boolean): Promise
     } finally {
       zip.close();
     }
-    return { names, parts };
+    return names.length === end.entries && directory === end.size ? { names, parts } : null;
   } catch {
     return null;
   }
 }
 
-/** An XML part as text; null if it could mean more than it shows: not UTF-8, another encoding declared, a NUL, an
- * entity declaration, or a reference other than the five predefined entities (`&#…;` or another name). */
-function xmlText(part: Buffer | undefined): string | null {
+/** An XML part as text; null if it could mean more than it shows: not UTF-8, another encoding declared, a NUL, a
+ * DTD with declarations of its own (or any DTD, unless `doctype`), or a reference other than the five predefined
+ * entities (`&#…;` or another name). */
+function xmlText(part: Buffer | undefined, doctype = true): string | null {
   if (!part) return null;
   let text: string;
   try {
@@ -179,31 +200,42 @@ function xmlText(part: Buffer | undefined): string | null {
   } catch {
     return null;
   }
-  if (/\u0000|<!ENTITY|&(?!(?:lt|gt|amp|quot|apos);)/i.test(text)) return null;
+  if (/\u0000|<!ENTITY|&(?!(?:lt|gt|amp|quot|apos);)/.test(text)) return null;
+  if (doctype ? /<!DOCTYPE(?:[^>"'[]|"[^"]*"|'[^']*')*\[/.test(text) : text.includes('<!DOCTYPE')) return null;
   const encoding = text.match(/^<\?xml\b[^>]*\bencoding\s*=\s*["']([^"']*)["']/)?.[1];
   return encoding === undefined || /^utf-8$/i.test(encoding) ? text : null;
 }
 
-/** The attributes of each `name` element (with any namespace prefix), as [name, value] pairs. */
+/** The attributes of each `name` element (with any namespace prefix, non-ASCII ones too), as [name, value] pairs. */
 const elements = (xml: string, name: string): [string, string][][] =>
-  [...xml.matchAll(new RegExp(`<(?:[\\w.-]+:)?${name}\\b((?:[^>"']|"[^"]*"|'[^']*')*)>`, 'g'))].map(([, attrs = '']) =>
-    [...attrs.matchAll(/(?:^|\s)([\w.:-]+)\s*=\s*(?:"([^"]*)"|'([^']*)')/g)].map(([, k = '', a, b]) => [k, (a ?? b ?? '').trim()]),
+  [...xml.matchAll(new RegExp(`<(?:[^\\s<>/:="'!?]+:)?${name}\\b((?:[^>"']|"[^"]*"|'[^']*')*)>`, 'g'))].map(([, attrs = '']) =>
+    [...attrs.matchAll(/(?:^|\s)([^\s=<>"'/]+)\s*=\s*(?:"([^"]*)"|'([^']*)')/g)].map(([, k = '', a, b]) => [k, (a ?? b ?? '').trim()]),
   );
+/** Every attribute value in a part, whatever element it is on: a second look that doesn't depend on reading the
+ * elements right. */
+const allValues = (xml: string) => [...xml.matchAll(/"([^"]*)"|'([^']*)'/g)].map(([, a, b]) => (a ?? b ?? '').trim());
 /** The values of the attributes with this local name, whatever their prefix: all of them, if it is repeated. */
 const values = (attrs: [string, string][], local: string) => attrs.filter(([k]) => k === local || k.endsWith(`:${local}`)).map(([, v]) => v);
 
 /** Office Open XML: the main part of the type, and no macro parts, types or relationships. */
 async function checkOoxml(data: Buffer, main: string): Promise<Refusal | null> {
   const zip = await readZip(data, (name) => name === '[Content_Types].xml' || /\.rels$/i.test(name));
-  const types = xmlText(zip?.parts.get('[Content_Types].xml'));
+  // Office Open XML allows no DTD in its parts (ISO/IEC 29500-2).
+  const types = xmlText(zip?.parts.get('[Content_Types].xml'), false);
   if (!zip || types === null) return 'content-mismatch';
   if (zip.names.some(isMacroName) || MACRO_TYPES.test(types)) return 'macro';
   for (const [name, part] of zip.parts) {
     if (name === '[Content_Types].xml') continue;
-    const rels = xmlText(part);
+    const rels = xmlText(part, false);
     if (rels === null) return 'content-mismatch';
+    // Any macro relationship type in the part, and as many external targets as the relationships read show.
+    const all = allValues(rels);
+    if (all.some((v) => MACRO_RELATIONSHIPS.test(v))) return 'macro';
+    const parsed = elements(rels, 'Relationship');
+    const externals = parsed.filter((rel) => values(rel, 'TargetMode').some((m) => m.toLowerCase() === 'external')).length;
+    if (all.filter((v) => v.toLowerCase() === 'external').length !== externals) return 'macro';
     // A link to a web page is fine; any other external target (a template, an image, a linked file) is not.
-    for (const rel of elements(rels, 'Relationship')) {
+    for (const rel of parsed) {
       const types = values(rel, 'Type');
       if (types.some((t) => MACRO_RELATIONSHIPS.test(t))) return 'macro';
       const external = values(rel, 'TargetMode').some((m) => m.toLowerCase() === 'external');
@@ -234,6 +266,7 @@ async function checkOdf(data: Buffer, contentType: string): Promise<Refusal | nu
   const entries = elements(manifest, 'file-entry');
   const paths = entries.flatMap((e) => values(e, 'full-path'));
   const types = entries.flatMap((e) => values(e, 'media-type'));
-  const macro = paths.some(isMacroName) || types.some((t) => MACRO_TYPES.test(t) || ODF_MACRO_TYPES.test(t));
+  const macro = paths.some(isMacroName) || types.some((t) => MACRO_TYPES.test(t) || ODF_MACRO_TYPES.test(t))
+    || allValues(manifest).some((v) => MACRO_TYPES.test(v));
   return macro || zip.names.some(isMacroName) ? 'macro' : null;
 }

@@ -454,6 +454,84 @@ export const REFUSED: { label: string; name: string; data: Buffer; reason: strin
     reason: 'macro',
   },
   {
+    label: 'a docx with a relationship element under a non-ASCII prefix',
+    name: 'doc.docx',
+    data: ooxml('docx', {
+      extra: [
+        {
+          name: 'word/_rels/document.xml.rels',
+          data: '<é:Relationships xmlns:é="http://schemas.openxmlformats.org/package/2006/relationships"><é:Relationship Id="rId9" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/oleObject" Target="embeddings/x.png"/></é:Relationships>',
+        },
+      ],
+    }),
+    reason: 'macro',
+  },
+  {
+    label: 'a docx with an external target under a non-ASCII prefix',
+    name: 'doc.docx',
+    data: ooxml('docx', {
+      extra: [
+        {
+          name: 'word/_rels/settings.xml.rels',
+          data: '<é:Relationships xmlns:é="http://schemas.openxmlformats.org/package/2006/relationships"><é:Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="file:///x/Modelo.png" TargetMode="External"/></é:Relationships>',
+        },
+      ],
+    }),
+    reason: 'macro',
+  },
+  {
+    label: 'a docx with a chart, whose workbook is embedded',
+    name: 'doc.docx',
+    data: ooxml('docx', {
+      extra: [
+        { name: 'word/charts/chart1.xml', data: xml },
+        { name: 'word/charts/_rels/chart1.xml.rels', data: rels([['package', '../embeddings/Microsoft_Excel_Worksheet.xlsx']]) },
+        { name: 'word/embeddings/Microsoft_Excel_Worksheet.xlsx', data: 'xlsx' },
+      ],
+    }),
+    reason: 'macro',
+  },
+  {
+    label: 'a docx with a DTD in a relationships part',
+    name: 'doc.docx',
+    data: ooxml('docx', { extra: [{ name: 'word/_rels/document.xml.rels', data: `<!DOCTYPE Relationships>${rels([['image', 'media/a.png']])}` }] }),
+    reason: 'content-mismatch',
+  },
+  {
+    label: 'a docx whose end record counts one entry less than its directory has',
+    name: 'doc.docx',
+    data: (() => {
+      const data = ooxml('docx', { extra: [{ name: 'word/media/a.png', data: 'png' }] });
+      data.writeUInt16LE(data.readUInt16LE(data.length - 14) - 1, data.length - 14);
+      data.writeUInt16LE(data.readUInt16LE(data.length - 12) - 1, data.length - 12);
+      return data;
+    })(),
+    reason: 'content-mismatch',
+  },
+  {
+    label: 'a docx with ZIP64 records',
+    name: 'doc.docx',
+    data: (() => {
+      const data = ooxml('docx');
+      const end = data.subarray(data.length - 22);
+      const record = Buffer.alloc(56);
+      record.writeUInt32LE(0x06064b50, 0);
+      record.writeBigUInt64LE(44n, 4);
+      record.writeUInt16LE(45, 12);
+      record.writeUInt16LE(45, 14);
+      record.writeBigUInt64LE(BigInt(end.readUInt16LE(10)), 24);
+      record.writeBigUInt64LE(BigInt(end.readUInt16LE(10)), 32);
+      record.writeBigUInt64LE(BigInt(end.readUInt32LE(12)), 40);
+      record.writeBigUInt64LE(BigInt(end.readUInt32LE(16)), 48);
+      const locator = Buffer.alloc(20);
+      locator.writeUInt32LE(0x07064b50, 0);
+      locator.writeBigUInt64LE(BigInt(data.length - 22), 8);
+      locator.writeUInt32LE(1, 16);
+      return Buffer.concat([data.subarray(0, data.length - 22), record, locator, end]);
+    })(),
+    reason: 'content-mismatch',
+  },
+  {
     label: 'a pptx with an OLE object relationship in an uppercase .RELS part',
     name: 'slides.pptx',
     data: ooxml('pptx', { extra: [{ name: 'ppt/slides/_rels/slide1.xml.RELS', data: rels([['oleObject', '../media/image1.png']]) }] }),
@@ -477,6 +555,23 @@ export const REFUSED: { label: string; name: string; data: Buffer; reason: strin
     label: 'an odt whose manifest uses a character reference',
     name: 'texto.odt',
     data: odf('text', { manifest: manifest([['Object 1', 'application/vnd.sun.star.ole&#111;bject']]) }),
+    reason: 'content-mismatch',
+  },
+  {
+    label: 'an odt listing an OLE object under a non-ASCII prefix',
+    name: 'texto.odt',
+    data: odf('text', {
+      manifest: manifest([['Object 1', 'application/vnd.sun.star.oleobject']]).replace(/manifest:(?=manifest|file-entry|full-path|media-type|version)/g, 'é:').replace('xmlns:manifest=', 'xmlns:é='),
+      extra: [{ name: 'Object 1', data: 'ole' }],
+    }),
+    reason: 'macro',
+  },
+  {
+    label: 'an odt whose manifest DTD declares attributes',
+    name: 'texto.odt',
+    data: odf('text', {
+      manifest: manifest([['content.xml', 'text/xml']]).replace('<manifest:manifest ', '<!DOCTYPE manifest:manifest [<!ATTLIST manifest:file-entry manifest:media-type CDATA "x">]>\n<manifest:manifest '),
+    }),
     reason: 'content-mismatch',
   },
   { label: 'an odt claiming another type', name: 'texto.odt', data: odf('spreadsheet'), reason: 'content-mismatch' },
