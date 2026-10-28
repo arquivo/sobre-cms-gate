@@ -17,7 +17,10 @@ export interface Config {
     webUrl: string;
     apiUrl: string;
   };
-  /** The CMS's origin (`https://<cms-host>`): the only target of postMessage and the only `Origin` accepted. */
+  /**
+   * The CMS's origin, the environment's site (`https://<site-host>`): the only target of postMessage and the only
+   * `Origin` accepted.
+   */
   cmsOrigin: string;
   /** `<cmsOrigin>/cms-api/callback`, as registered on the GitHub App. */
   callbackUrl: string;

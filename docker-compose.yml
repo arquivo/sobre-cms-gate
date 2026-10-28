@@ -1,4 +1,4 @@
-# Example deployment on the CMS host, behind Caddy. Reachable on 127.0.0.1:8787 only.
+# Example deployment on an environment's VM, behind its Caddy. Reachable on 127.0.0.1:8787 only.
 #
 #   cp .env.example .env            # and fill it in
 #   mkdir -m 700 secrets            # put the four secret files in it (see `secrets:` below),

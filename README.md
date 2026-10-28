@@ -9,13 +9,15 @@ things for it:
 - **Uploads.** It receives files from the media library, checks them, and writes them to the Ceph RGW bucket
   `sobre-media` under `media/`, where the site serves them at `/media/...`.
 
-It listens on 127.0.0.1, behind Caddy, on the CMS host (`<cms-host>`), which is reachable only from the VPN and the
-office network. The design is `docs/decisions/cms-gate.md` in static-sobre (decisions D7, D13, D15 and D16 of its
-`docs/plan.md`); this README lists where the code differs from it.
+Each environment of the site (dev, preprod and production, one VM each) runs its own cms-gate. It listens on 127.0.0.1,
+behind the site's Caddy, which lets only the VPN and the office network reach the CMS at `/admin/` and `/cms-api/`.
+Decap commits to that environment's branch with the editor's own token; cms-gate only signs editors in and uploads, and
+the three instances upload to the same bucket. The design is `docs/decisions/cms-gate.md` in static-sobre (decisions D7,
+D13, D15 and D16 of its `docs/plan.md`); this README lists where the code differs from it.
 
 ```text
-editor (VPN / office) ──https──▶ Caddy, <cms-host>   (remote_ip allowlist)
-                                   ├─ /admin/, its assets  → the staging release
+editor (VPN / office) ──https──▶ Caddy, <site>      (client_ip allowlist for /admin/ and /cms-api/)
+                                   ├─ /admin/, its assets  → the site's own release
                                    └─ /cms-api/*           → cms-gate on 127.0.0.1:8787
 cms-gate ──https──▶ github.com, api.github.com        (sign-in, token and team checks)
 cms-gate ──https──▶ RGW, bucket sobre-media, media/    (uploads, list)
@@ -160,7 +162,7 @@ the list of problems if anything is missing or inconsistent. `.env.example` has 
 | `GITHUB_PRIVATE_KEY_FILE` | required | File with the App's private key (PEM, RSA). |
 | `GITHUB_ORG` | required | `arquivo` |
 | `GITHUB_TEAM` | required | The team's slug: `sobre-editors` |
-| `CMS_ORIGIN` | required | The CMS's origin, `https://<cms-host>`: no path, no trailing slash. The only `postMessage` target and the only `Origin` accepted; the callback is `<CMS_ORIGIN>/cms-api/callback`. |
+| `CMS_ORIGIN` | required | The CMS's origin, which is the site's: `https://sobre.arquivo.pt`, `https://preprod.sobre.arquivo.pt` or `https://dev.sobre.arquivo.pt`. No path, no trailing slash. The only `postMessage` target and the only `Origin` accepted; the callback is `<CMS_ORIGIN>/cms-api/callback`. |
 | `S3_ENDPOINT` | required | The RGW's base URL, `https://<rgw-host>` (path-style requests). |
 | `S3_REGION` | `us-east-1` | The signing region the RGW expects. |
 | `S3_BUCKET` | required | `sobre-media` |
@@ -185,7 +187,7 @@ stub; leave them unset.
 
 ### With Compose (the deployment)
 
-The image is `arquivo/sobre-cms-gate` on Docker Hub. On the CMS host:
+The image is `arquivo/sobre-cms-gate` on Docker Hub. On each environment's VM:
 
 ```sh
 cp .env.example .env              # fill in the placeholders
@@ -203,7 +205,8 @@ when to update.
 
 ### Behind Caddy
 
-In the CMS vhost, inside its `remote_ip` allowlist (static-sobre's step 4.7a/4.7b):
+In the site's vhost, inside its `client_ip` allowlist (static-sobre's step 4.7a/4.7b; `caddy/sobre.caddy` there has
+the full route):
 
 ```caddyfile
 handle /cms-api/* {
@@ -216,15 +219,16 @@ handle /cms-api/* {
 }
 ```
 
-`max_size` must be a little above `MAX_UPLOAD_BYTES` (the multipart wrapping adds a few hundred bytes); cms-gate
-refuses anything over `MAX_UPLOAD_BYTES` plus 64 KiB itself. Caddy sets `X-Forwarded-For` to the client address
-alone: `header_up X-Forwarded-For {client_ip}`, as in static-sobre's `sobre-cms` snippet. `{client_ip}` is the address
-that the vhost's allowlist checks too: the peer's, or with a load balancer listed in `trusted_proxies`, the one the
-balancer gives (see static-sobre's `docs/runbooks/deploy.md`). cms-gate takes the last `X-Forwarded-For` entry, the
-only one Caddy sends, as the address for the rate limits, if it is an IP address; otherwise it takes the peer's, which
-inside the container is the Docker bridge, so all such requests share one limit. The port is published on 127.0.0.1
-only: no one off the host can reach cms-gate and set that header. The production and staging vhosts answer 404 for
-`/cms-api/`. Caddy should not add its own CSP or caching headers to `/cms-api/*`: cms-gate sets them.
+`max_size` must be a little above `MAX_UPLOAD_BYTES` (the multipart wrapping adds a few hundred bytes); cms-gate refuses
+anything over `MAX_UPLOAD_BYTES` plus 64 KiB itself. Caddy sets `X-Forwarded-For` to the client address alone:
+`header_up X-Forwarded-For {client_ip}`, as in static-sobre's `sobre-vhost` snippet. `{client_ip}` is the address that the
+vhost's allowlist checks too: the peer's, or with a load balancer listed in `trusted_proxies`, the one the balancer
+gives (see static-sobre's `docs/runbooks/deploy.md`). cms-gate takes the last `X-Forwarded-For` entry, the only one
+Caddy sends, as the address for the rate limits, if it is an IP address; otherwise it takes the peer's, which inside the
+container is the Docker bridge, so all such requests share one limit. The port is published on 127.0.0.1 only: no one
+off the host can reach cms-gate and set that header. Outside the client ranges, production answers 404 for `/admin/` and
+`/cms-api/`, and dev and preprod answer 403 for everything. Caddy should not add its own CSP or caching headers to
+`/cms-api/*`: cms-gate sets them.
 
 ### Decap (static-sobre's `src/lib/cms.ts`)
 
@@ -234,8 +238,8 @@ Not changed here; this is what static-sobre needs (steps 5.2 and 5.3):
 backend: {
   name: 'github',
   repo: 'arquivo/static-sobre',
-  branch: 'main',
-  base_url: 'https://<cms-host>',   // exactly CMS_ORIGIN
+  branch: 'preprod',                            // the environment's branch: main, preprod or dev
+  base_url: 'https://preprod.sobre.arquivo.pt',  // the page's origin: exactly that environment's CMS_ORIGIN
   auth_endpoint: 'cms-api/auth',
   // commit_messages as today
 },
@@ -256,8 +260,10 @@ To do by an org owner (static-sobre's step 5.2b); cms-gate never changes the App
 
 - [ ] Create the App under the `arquivo` organisation (Settings → Developer settings → GitHub Apps), e.g.
       `arquivo-sobre-cms`, with:
-  - Homepage URL: `https://<cms-host>/admin/`
-  - Callback URL: `https://<cms-host>/cms-api/callback`
+  - Homepage URL: `https://sobre.arquivo.pt/admin/`
+  - Callback URLs, one per environment: `https://sobre.arquivo.pt/cms-api/callback`,
+    `https://preprod.sobre.arquivo.pt/cms-api/callback` and `https://dev.sobre.arquivo.pt/cms-api/callback`. Each
+    cms-gate sends its own (`<CMS_ORIGIN>/cms-api/callback`), and GitHub accepts it only if it is listed.
   - **Expire user authorization tokens**: on (8 hours)
   - Request user authorization during installation: off; Device flow: off
   - Webhook: **off** (no URL, no secret)
@@ -267,21 +273,22 @@ To do by an org owner (static-sobre's step 5.2b); cms-gate never changes the App
   - Where can it be installed: only on this account
 - [ ] Install it on the org, for **`arquivo/static-sobre` only**. The installation id is the number at the end of the
       installation's settings URL.
-- [ ] Generate a client secret and a private key. Keep both in the team vault and on the CMS host
+- [ ] Generate a client secret and a private key. Keep both in the team vault and on the three VMs
       (`secrets/github-client-secret`, `secrets/github-app.private-key.pem`), nowhere else.
 - [ ] Create the team `arquivo/sobre-editors`, give it **Write** on `static-sobre`, add the editors, and require 2FA in
       the org.
 - [ ] Put the App id, client id and installation id in `.env`.
 
 An editor's token can do only what both the App and the editor may do: here, read and write `static-sobre`'s
-contents. The S3 key (`sobre-cms-gate`) is the one in static-sobre's `docs/runbooks/ceph-buckets.md`: PutObject,
-GetObject and AbortMultipartUpload on `sobre-media/media/*`, ListBucket with prefix `media/`, no delete.
+contents. The S3 user (`sobre-cms-gate`) is the one in static-sobre's `docs/runbooks/ceph-buckets.md`: PutObject,
+GetObject and AbortMultipartUpload on `sobre-media/media/*`, ListBucket with prefix `media/`, no delete. Each VM's
+cms-gate has a key of its own for that user, so one can be revoked alone.
 
 ## Threat model
 
 | Threat | What stops it |
 | --- | --- |
-| Someone outside the VPN or office reaches the CMS | Caddy's `remote_ip` allowlist (and the firewall); cms-gate listens on 127.0.0.1 only. |
+| Someone outside the VPN or office reaches the CMS | Caddy's `client_ip` allowlist (and the firewall); cms-gate listens on 127.0.0.1 only. |
 | A GitHub user who is not an editor signs in | The team check at sign-in, with the App's own installation token; the token is revoked and never sent to the browser. |
 | An editor's token from another App or tool is used on the media API | Only this App's user tokens are accepted: GitHub's token check, with the App's client id and secret. A token not shaped like one (`ghu_…`) is refused without asking GitHub, so made-up tokens don't spend the App's rate limit. |
 | An ex-editor keeps using an old token | The team check on each upload and list (cached 5 minutes at most); the token is revoked once the check fails; tokens expire after 8 hours. |
@@ -297,8 +304,8 @@ GetObject and AbortMultipartUpload on `sobre-media/media/*`, ListBucket with pre
 | A compromised dependency | Two production dependencies (aws4, yauzl), pinned, with a lockfile, installed with `--ignore-scripts`; actions pinned by commit. |
 
 Accepted risks, from the spec: an upload is public by URL as soon as it is written, before its page is published
-(embargoed documents are not uploaded through the CMS); uploads from staging go to the production bucket; an editor's
-own GitHub account can also change code (D15).
+(embargoed documents are not uploaded through the CMS); the three environments upload to one bucket, so a file uploaded
+on dev or preprod is public at once; an editor's own GitHub account can also change code (D15).
 
 ## Differences from the spec
 
@@ -320,7 +327,7 @@ own GitHub account can also change code (D15).
 - **No ClamAV scan** (optional in the spec).
 - **Memory.** An upload is held in memory while it is checked, about three times its size, with four at most at once:
   hence the 1 GiB limit in Compose.
-- **Rate limits are in memory, per process.** A restart resets them; run one instance.
+- **Rate limits are in memory, per process.** A restart resets them; run one instance per environment.
 
 ## Development
 
