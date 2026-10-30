@@ -167,6 +167,7 @@ the list of problems if anything is missing or inconsistent. `.env.example` has 
 | `S3_REGION` | `us-east-1` | The signing region the RGW expects. |
 | `S3_BUCKET` | required | `sobre-media` |
 | `S3_PREFIX` | required | `media/` (must end with `/`) |
+| `S3_ACL` | `public-read` | Canned ACL sent with each upload (`x-amz-acl`): `public-read`, `private`, or `none` to send no ACL header (when the bucket policy alone grants the public reads). |
 | `S3_ACCESS_KEY_ID_FILE` | required | File with the `sobre-cms-gate` access key id. |
 | `S3_SECRET_ACCESS_KEY_FILE` | required | File with its secret key. |
 | `S3_CA_FILE` | none | PEM bundle for an RGW certificate signed by a private CA (it replaces the system CAs). |
@@ -282,7 +283,9 @@ To do by an org owner (static-sobre's step 5.2b); cms-gate never changes the App
 An editor's token can do only what both the App and the editor may do: here, read and write `static-sobre`'s
 contents. The S3 user (`sobre-cms-gate`) is the one in static-sobre's `docs/runbooks/ceph-buckets.md`: PutObject,
 GetObject and AbortMultipartUpload on `sobre-media/media/*`, ListBucket with prefix `media/`, no delete. Each VM's
-cms-gate has a key of its own for that user, so one can be revoked alone.
+cms-gate has a key of its own for that user, so one can be revoked alone. With `S3_ACL` set (`public-read` by
+default) each PutObject carries `x-amz-acl`: the bucket policy must allow that value on PutObject (a statement that
+denies `x-amz-acl` on writes refuses every upload with 403); PutObjectAcl is not needed.
 
 ## Threat model
 
@@ -298,6 +301,7 @@ cms-gate has a key of its own for that user, so one can be revoked alone.
 | A file that runs as a page, or a script, on the site's origin | An extension list without SVG, HTML or XML; the content must match the extension; text must not start with `<`; cms-gate sets the `Content-Type` itself; the media vhost sends `nosniff` and a sandbox CSP. |
 | An office file with macros | Refused by content (not by name): VBA, macro content types, macro sheets, ActiveX, OLE and embedded office files, ODF scripts, in the entry names, content types, relationships and manifest; entry names and the zip's structure must read the same in every zip reader, and the XML must be plain; the relationships and manifest are also checked value by value, whatever their elements' prefix. |
 | Overwriting or deleting a published file | Keys chosen by the server; `If-None-Match: *` on each write; no delete call exists, and the S3 key can't delete; the bucket is versioned. |
+| An upload made public wider than meant | The ACL is fixed by configuration (`S3_ACL`: `public-read`, `private` or none), never taken from the request; no `x-amz-grant-*` headers are sent, and `public-read-write` is not accepted. |
 | Path tricks in names | The name is reduced to a slug; the key is always `<prefix>YYYY/MM/<slug>.<ext>`. |
 | Floods and large bodies | Rate limits per address and per login; body limit in Caddy and in cms-gate; four uploads at once; request timeouts. |
 | Secrets in logs or the image | Secrets from files only, never logged; logs hold no tokens or contents (tested); `.dockerignore` keeps `.env`, `secrets/` and keys out of the build. |

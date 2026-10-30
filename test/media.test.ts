@@ -67,8 +67,10 @@ describe('media uploads', () => {
     const put = app.s3.calls.findLast((c) => c.method === 'PUT');
     assert.equal(put?.headers['content-type'], 'image/png');
     assert.equal(put?.headers['if-none-match'], '*');
+    assert.equal(put?.headers['x-amz-acl'], 'public-read');
+    assert.match(put?.headers.authorization ?? '', /SignedHeaders=[^,]*x-amz-acl/);
     for (const name of Object.keys(put?.headers ?? {})) {
-      assert.ok(!name.startsWith('x-amz-meta-') && name !== 'x-amz-acl' && name !== 'content-disposition', name);
+      assert.ok(!name.startsWith('x-amz-meta-') && !name.startsWith('x-amz-grant-') && name !== 'content-disposition', name);
     }
   });
 
@@ -328,6 +330,21 @@ describe('media listing', () => {
       assert.equal((await app.list(token, q)).status, 400, q);
     }
   });
+});
+
+describe('upload ACL', () => {
+  for (const [value, header] of [['private', 'private'], ['none', undefined]] as const) {
+    test(`S3_ACL=${value} sends ${header ?? 'no'} x-amz-acl`, async () => {
+      const app = await startApp({ env: { S3_ACL: value } });
+      try {
+        app.github.members.set('ana', 'active');
+        assert.equal((await app.upload(app.github.tokenFor('ana'), 'logo.png', png)).status, 201);
+        assert.equal(app.s3.calls.findLast((c) => c.method === 'PUT')?.headers['x-amz-acl'], header);
+      } finally {
+        await app.close();
+      }
+    });
+  }
 });
 
 describe('upload limits', () => {

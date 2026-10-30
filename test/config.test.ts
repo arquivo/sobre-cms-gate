@@ -32,6 +32,7 @@ describe('config', () => {
     assert.equal(config.s3.secretAccessKey, 's3-secret-value');
     assert.equal(config.s3.prefix, 'media/');
     assert.equal(config.s3.region, 'us-east-1');
+    assert.equal(config.s3.acl, 'public-read');
     assert.deepEqual(config.listen, { host: '127.0.0.1', port: 8787 });
     assert.equal(config.maxUploadBytes, 50 * 1024 * 1024);
     assert.equal(config.trustProxy, true);
@@ -88,6 +89,14 @@ describe('config', () => {
     assert.ok(problems(env({ S3_ENDPOINT: 'http://rgw.example.test' })).some((p) => p.startsWith('S3_ENDPOINT must use https')));
     assert.ok(problems(env({ GITHUB_API_URL: 'http://api.example.test' })).some((p) => p.startsWith('GITHUB_API_URL must use https')));
     assert.ok(problems(env({ S3_ENDPOINT: 'https://rgw.example.test/bucket' })).some((p) => p.startsWith('S3_ENDPOINT must be a bare origin')));
+  });
+
+  test('the upload ACL is public-read, private or none', () => {
+    for (const bad of ['public-read-write', 'authenticated-read', 'Public-Read', 'bucket-owner-full-control']) {
+      assert.ok(problems(env({ S3_ACL: bad })).includes('S3_ACL is not valid'), bad);
+    }
+    assert.equal(loadConfig(env({ S3_ACL: 'private' })).config.s3.acl, 'private');
+    assert.equal(loadConfig(env({ S3_ACL: 'none' })).config.s3.acl, null);
   });
 
   test('the prefix must be a plain folder ending in a slash', () => {

@@ -64,13 +64,17 @@ export class S3 {
     throw new S3Error(`HEAD failed (${res.status})`);
   }
 
-  /** Writes a new object; 'exists' if the key was taken in the meantime. Only the headers set here are sent. */
+  /**
+   * Writes a new object, with the canned ACL if one is set; 'exists' if the key was taken in the meantime. Only the
+   * headers set here are sent.
+   */
   async put(key: string, body: Buffer, contentType: string, sha256: string): Promise<'created' | 'exists'> {
     const res = await this.#request('PUT', `/${encodeKey(key)}`, body, {
       'Content-Type': contentType,
       'Content-Length': String(body.length),
       'X-Amz-Content-Sha256': sha256,
       'If-None-Match': '*',
+      ...(this.#config.acl ? { 'x-amz-acl': this.#config.acl } : {}),
     });
     if (res.status === 200) return 'created';
     if (res.status === 412 || res.status === 409) return 'exists';

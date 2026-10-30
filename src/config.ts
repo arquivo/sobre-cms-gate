@@ -34,6 +34,8 @@ export interface Config {
     bucket: string;
     /** Key prefix of the uploads, e.g. `media/`; served at `/<prefix>`. */
     prefix: string;
+    /** Canned ACL sent with each upload (`x-amz-acl`), or null to send none. */
+    acl: 'public-read' | 'private' | null;
     accessKeyId: string;
     secretAccessKey: string;
     /** PEM bundle that replaces the system CAs for the RGW, when it has a private CA. */
@@ -161,6 +163,8 @@ export function loadConfig(env: Env, readFile: ReadFile = (p) => readFileSync(p)
   const region = str('S3_REGION', /^[a-z0-9-]{1,64}$/, 'us-east-1');
   const bucket = str('S3_BUCKET', /^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/);
   const prefix = str('S3_PREFIX', /^(?:[a-z0-9][a-z0-9_-]*\/)+$/);
+  const aclValue = str('S3_ACL', /^(?:public-read|private|none)$/, 'public-read');
+  const acl = aclValue === 'public-read' || aclValue === 'private' ? aclValue : null;
   const accessKeyId = text(secret('S3_ACCESS_KEY_ID'));
   const secretAccessKey = text(secret('S3_SECRET_ACCESS_KEY'));
   let ca: Buffer | undefined;
@@ -194,7 +198,7 @@ export function loadConfig(env: Env, readFile: ReadFile = (p) => readFileSync(p)
       callbackUrl: `${cms.origin}/cms-api/callback`,
       listen: { host, port },
       trustProxy,
-      s3: { endpoint, region, bucket, prefix, accessKeyId, secretAccessKey, ca },
+      s3: { endpoint, region, bucket, prefix, acl, accessKeyId, secretAccessKey, ca },
       maxUploadBytes,
       limits,
     },
