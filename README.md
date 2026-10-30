@@ -167,7 +167,7 @@ the list of problems if anything is missing or inconsistent. `.env.example` has 
 | `S3_REGION` | `us-east-1` | The signing region the RGW expects. |
 | `S3_BUCKET` | required | `sobre-media` |
 | `S3_PREFIX` | required | `media/` (must end with `/`) |
-| `S3_ACL` | `public-read` | Canned ACL sent with each upload (`x-amz-acl`): `public-read`, `private`, or `none` to send no ACL header (when the bucket policy alone grants the public reads). |
+| `S3_ACL` | `public-read` | Canned ACL sent with each upload (`x-amz-acl`): `public-read`, `private`, or `none` to send no ACL header (if a bucket policy grants the public reads instead). |
 | `S3_ACCESS_KEY_ID_FILE` | required | File with the `sobre-cms-gate` access key id. |
 | `S3_SECRET_ACCESS_KEY_FILE` | required | File with its secret key. |
 | `S3_CA_FILE` | none | PEM bundle for an RGW certificate signed by a private CA (it replaces the system CAs). |
@@ -284,8 +284,7 @@ An editor's token can do only what both the App and the editor may do: here, rea
 contents. The S3 user (`sobre-cms-gate`) is the one in static-sobre's `docs/runbooks/ceph-buckets.md`: PutObject,
 GetObject and AbortMultipartUpload on `sobre-media/media/*`, ListBucket with prefix `media/`, no delete. Each VM's
 cms-gate has a key of its own for that user, so one can be revoked alone. With `S3_ACL` set (`public-read` by
-default) each PutObject carries `x-amz-acl`: the bucket policy must allow that value on PutObject (a statement that
-denies `x-amz-acl` on writes refuses every upload with 403); PutObjectAcl is not needed.
+default) each PutObject carries `x-amz-acl`, which PutObject itself covers; PutObjectAcl is not needed.
 
 ## Threat model
 
